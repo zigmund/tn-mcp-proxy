@@ -262,3 +262,26 @@ to use as a cache key (for example single-use codes).
 **Nonce volume.** Nonces are random 96-bit values, which bounds safe usage to
 roughly 2^32 seals per key. Rotation switches sealing to a new key and resets
 the count.
+
+## Server lifecycle
+
+`internal/server` assembles one `http.ServeMux`: the OAuth metadata and
+endpoints, one proxy handler per upstream registered at the exact pattern
+`upstream.path` (so `path/` and `path/x` are 404), and `GET /healthz`
+(HEAD too) which answers `200 ok` without authentication. `/healthz` is
+served outside the access-log middleware so probes do not flood the debug log;
+everything else is wrapped by `httplog`.
+
+`http.Server` settings: `ReadHeaderTimeout` 10s (slowloris), `IdleTimeout`
+120s (above nginx's 60s upstream keepalive), `MaxHeaderBytes` 64 KiB. There is
+intentionally no `ReadTimeout`/`WriteTimeout`: they are absolute deadlines and
+would cut SSE streams and slow tool calls. `net/http` server errors go to the
+slog logger at `warn`.
+
+Signals: `SIGINT`/`SIGTERM` start a graceful shutdown (15s). Streams that
+outlive the timeout are closed forcibly and the process still exits 0.
+`SIGHUP` never terminates the process; it runs the registered reload hooks
+(`Server.OnReload`) or logs `reload requested, nothing to reload`. Built-in TLS
+is not implemented yet: a config with `tls.cert_file`/`tls.key_file` makes the
+service fail at startup instead of silently serving plain HTTP. A listen
+failure (e.g. address in use) exits non-zero with the error.

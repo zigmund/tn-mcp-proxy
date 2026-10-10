@@ -91,12 +91,15 @@ jobs:
           cache: false
 
       - name: Create and push annotated tag
+        id: tag
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "Release $VERSION"
           git push origin "refs/tags/$VERSION"
+          # Only reached when the push succeeded; gates the recovery hint below.
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -107,8 +110,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Recovery instructions
-        if: failure()
+        if: failure() && steps.tag.outputs.pushed == 'true'
         run: |
-          echo "::error::Release failed. Clean up before re-running:"
+          echo "::error::Release failed after tag $VERSION was pushed. Clean up before re-running:"
           echo "  gh release delete \"$VERSION\" --repo \"$GITHUB_REPOSITORY\" --yes   # only if the release was created"
-          echo "  git push origin :refs/tags/$VERSION                                  # delete the remote tag"
+          echo "  git push origin \":refs/tags/$VERSION\"                                # delete the remote tag"
+
+      - name: Pre-push failure hint
+        if: failure() && steps.tag.outputs.pushed != 'true'
+        run: |
+          echo "::error::Release failed before the tag push completed. If unsure whether the tag reached the remote, check before re-running:"
+          echo "  git ls-remote --tags origin \"refs/tags/$VERSION\""

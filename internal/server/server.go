@@ -49,7 +49,9 @@ const (
 
 // There is deliberately no ReadTimeout and no WriteTimeout: both are absolute
 // deadlines on the whole request/response and would kill SSE streams and slow
-// tool calls. The proxy transport applies its own upstream timeouts.
+// tool calls. The proxy transport applies its own upstream timeouts. The
+// OAuth and well-known routes, which never stream, get a per-request read
+// deadline instead (withOAuthReadDeadline).
 
 // Server is the assembled HTTP service.
 type Server struct {
@@ -105,8 +107,8 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Ha
 		inner.Handle(up.Path, ph)
 	}
 
-	logged := httplog.Middleware(log, inner, httplog.WithResolver(res))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	logged := withOAuthReadDeadline(httplog.Middleware(log, inner, httplog.WithResolver(res)))
+	var root http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == PathHealthz && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			healthz(w, r)
 			return
@@ -114,7 +116,11 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Ha
 		// Everything else, including ServeMux redirects for non-clean paths,
 		// is access-logged. Other methods on /healthz get the mux 404.
 		logged.ServeHTTP(w, r)
-	}), nil
+	})
+	if cfg.TLSEnabled() {
+		root = withHSTS(root)
+	}
+	return root, nil
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

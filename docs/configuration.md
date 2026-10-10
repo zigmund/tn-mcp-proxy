@@ -10,16 +10,17 @@ Error messages never echo URL or key material.
 | Field | Default | Notes |
 |---|---|---|
 | `listen` | `127.0.0.1:8787` | `host:port`, port 0..65535 |
-| `public_url` | required | Absolute http(s) origin: no path (the proxy owns the host-root `/.well-known/*` and `/oauth/*` paths), userinfo, query or fragment. Normalized: lowercase scheme/host, default port (80/443) dropped, trailing slash stripped |
+| `public_url` | required | Absolute https origin (http only for loopback hosts, or with `allow_insecure_http`): no path (the proxy owns the host-root `/.well-known/*` and `/oauth/*` paths), userinfo, query or fragment. Normalized: lowercase scheme/host, default port (80/443) dropped, trailing slash stripped |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` (case-insensitive; other values are rejected; `debug` enables the access log) |
 | `log.format` | `json` | `json`, `text` (case-insensitive; other values are rejected) |
-| `secrets.token_keys` | | Base64 (standard) of 32 bytes each; first key encrypts, others only decrypt |
+| `allow_insecure_http` | `false` | Top-level bool. Accept plain `http://` for non-loopback hosts in `public_url`, `oauth.allowed_redirect_uris` and `upstreams[].url`. Logs one startup warning. See [Transport security](#transport-security) |
+| `secrets.token_keys` | | Base64 (standard) of 32 random bytes each (`openssl rand -base64 32`); first key encrypts, others only decrypt. Known-weak keys are rejected, see below |
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
 | `oauth.access_token_ttl` | `1h` | Positive duration |
 | `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry), but never beyond `oauth.max_session_ttl` |
 | `oauth.max_session_ttl` | `2160h` (90 days) | Positive duration; absolute lifetime of a login, counted from the code exchange and never extended by refreshing. Once it has passed, the refresh grant fails with `invalid_grant` and the user must reconnect; refresh and access token expiry (and `expires_in`) are capped at the session end. Refresh tokens issued before this setting existed carry no start time: their first refresh after an upgrade starts a fresh window, so existing logins get a full `max_session_ttl` from then on. There is no upper bound |
 | `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form. Codes are single-use |
-| `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute http(s) URLs, no duplicates |
+| `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute https URLs (http only for loopback or with `allow_insecure_http`), no duplicates |
 | `oauth.rate_limit.disabled` | `false` | Turns the in-app per-IP rate limiting of the OAuth endpoints off. See [Rate limiting](#rate-limiting) |
 | `oauth.rate_limit.register` | `per_minute: 60`, `burst: 30` | Limit for `POST /oauth/register` |
 | `oauth.rate_limit.token` | `per_minute: 300`, `burst: 100` | Limit for `POST /oauth/token` |
@@ -38,7 +39,12 @@ Relative `secrets.token_keys_file`, `tls.cert_file` and `tls.key_file` paths are
 resolved against the config file's directory.
 
 Exactly one of `secrets.token_keys` and `secrets.token_keys_file` must be set.
-Keys must be unique. After loading, the decoded keys are available only as
+Keys must be unique. Known-insecure keys are rejected at startup: the public
+key that older example configs shipped (bytes `0x00`..`0x1f`), the all-zero
+key, and any key whose bytes form a constant-step sequence (all the same byte,
+`0,1,2,...`, `31,30,...`). The error names the key's position, never its
+value. Generate real keys with `openssl rand -base64 32`. After loading, the
+decoded keys are available only as
 `Config.Secrets.Keys`; the encoded strings are dropped and secrets are redacted
 in logs, `fmt`, JSON and YAML output.
 
@@ -290,12 +296,35 @@ oauth:
 trusted_proxies: ["127.0.0.0/8", "::1/128"]
 ```
 
+## Transport security
+
+`public_url`, every `oauth.allowed_redirect_uris` entry and every
+`upstreams[].url` must use `https`. The exception is loopback hosts, accepted
+by name (`localhost`) or literal (`127.0.0.0/8`, `::1`), which may use `http`
+for local development. A violation fails startup, for example `public_url: must
+use https (http is allowed only for loopback hosts or with
+allow_insecure_http)`. Setting the top-level `allow_insecure_http: true` lifts
+the rule for non-loopback hosts (for instance an upstream reachable only over a
+private network) and logs one startup warning.
+
+When built-in TLS is configured the service adds
+`Strict-Transport-Security: max-age=31536000` to every response, proxied ones
+included (it replaces any value from an upstream). Without built-in TLS the
+service sends no HSTS header: add it at the reverse proxy (see the nginx snippet
+below).
+
+OAuth and `/.well-known/*` requests get a 10 second read deadline (a slow-body
+client is cut off); the proxied MCP paths have none, so long SSE streams are
+unaffected.
+
 ## Built-in TLS
 
 Setting both `tls.cert_file` and `tls.key_file` makes the service serve HTTPS on
 `listen` (minimum TLS 1.2, Go's default cipher suites, HTTP/2 and HTTP/1.1 via
 ALPN). Plain HTTP is not served on that port. `public_url` is independent of
-this setting: keep it `https` whether TLS ends here or in a proxy in front.
+this setting: it must be `https` whether TLS ends here or in a proxy in front
+(enforced, see [Transport security](#transport-security)). With built-in TLS
+the service sets HSTS.
 
 ```yaml
 tls:
@@ -373,6 +402,8 @@ server {
     server_name mcp.example.com;
     ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;   # HSTS (the service sends it itself only with built-in TLS)
 
     client_max_body_size 10m;           # the service rejects bodies over 10 MiB (413)
 

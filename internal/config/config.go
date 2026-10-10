@@ -104,6 +104,10 @@ type Config struct {
 	Upstreams []Upstream `yaml:"upstreams"`
 	TLS       TLS        `yaml:"tls"`
 
+	// AllowInsecureHTTP lets public_url, allowed_redirect_uris and upstream
+	// URLs use plain http for non-loopback hosts. Off by default.
+	AllowInsecureHTTP bool `yaml:"allow_insecure_http"`
+
 	// TrustedProxies lists the CIDRs (or bare IPs) of reverse proxies whose
 	// X-Forwarded-For / X-Real-IP headers are honoured. Empty means loopback.
 	TrustedProxies []string `yaml:"trusted_proxies"`
@@ -410,6 +414,8 @@ func (c *Config) loadKeys() error {
 			errs = append(errs, fmt.Errorf("%s: not valid standard base64", where[i]))
 		case len(k) != KeySize:
 			errs = append(errs, fmt.Errorf("%s: decoded length is %d bytes, want %d", where[i], len(k), KeySize))
+		case insecureKey(k):
+			errs = append(errs, fmt.Errorf("%s: is a known insecure key (the published example key, or an all-zero, repeated-byte or incrementing pattern); generate one with `openssl rand -base64 32`", where[i]))
 		default:
 			if prev, dup := seen[string(k)]; dup {
 				errs = append(errs, fmt.Errorf("%s: duplicates %s", where[i], prev))
@@ -425,6 +431,52 @@ func (c *Config) loadKeys() error {
 	return nil
 }
 
+// exampleKey is the key that older example configs shipped (bytes 0x00..0x1f).
+// It is public, so it must never protect real tokens. insecureKey's
+// constant-step rule already covers it; the explicit match is kept so the
+// shipped example key stays rejected even if that heuristic changes.
+const exampleKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+// insecureKey reports whether k is a known-weak token key: the published
+// example key, or any constant-stride byte sequence (all zero, all the same
+// byte, 0,1,2,... and the like).
+func insecureKey(k []byte) bool {
+	if ex, err := base64.StdEncoding.DecodeString(exampleKey); err == nil && bytes.Equal(k, ex) {
+		return true
+	}
+	for i := 2; i < len(k); i++ {
+		if k[i]-k[i-1] != k[1]-k[0] {
+			return false
+		}
+	}
+	return len(k) > 0
+}
+
+// errInsecureScheme is returned for a non-https URL that is not exempt.
+var errInsecureScheme = errors.New("must use https (http is allowed only for loopback hosts or with allow_insecure_http)")
+
+// checkTransport requires https unless the host is loopback or allowInsecure
+// is set. raw must already have passed checkHTTPURL.
+func checkTransport(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || strings.EqualFold(u.Scheme, "https") || allowInsecure {
+		return nil
+	}
+	if isLoopbackHost(u.Hostname()) {
+		return nil
+	}
+	return errInsecureScheme
+}
+
+// isLoopbackHost reports whether h is localhost or a loopback IP literal.
+func isLoopbackHost(h string) bool {
+	if strings.EqualFold(strings.TrimSuffix(h, "."), "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(h)
+	return err == nil && a.Unmap().IsLoopback()
+}
+
 func (c *Config) validate() []error {
 	var errs []error
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
@@ -438,6 +490,8 @@ func (c *Config) validate() []error {
 	if c.PublicURL == "" {
 		add("public_url: required")
 	} else if _, err := normalizePublicURL(c.PublicURL); err != nil {
+		add("public_url: %v", err)
+	} else if err := checkTransport(c.PublicURL, c.AllowInsecureHTTP); err != nil {
 		add("public_url: %v", err)
 	}
 
@@ -469,6 +523,8 @@ func (c *Config) validate() []error {
 	for i, r := range c.OAuth.AllowedRedirectURIs {
 		if err := checkHTTPURL(r, true); err != nil {
 			add("oauth.allowed_redirect_uris[%d]: %v", i, err)
+		} else if err := checkTransport(r, c.AllowInsecureHTTP); err != nil {
+			add("oauth.allowed_redirect_uris[%d]: %v", i, err)
 		}
 		if j, dup := redirects[r]; dup {
 			add("oauth.allowed_redirect_uris[%d]: duplicates [%d]", i, j)
@@ -483,6 +539,15 @@ func (c *Config) validate() []error {
 	paths := map[string]int{}
 	for i := range c.Upstreams {
 		errs = append(errs, c.Upstreams[i].validate(i, names, paths)...)
+		// Upstream.validate already checks URL syntax (and reports it); this
+		// second parse only adds the scheme rule, which needs the config-wide
+		// allow_insecure_http. It runs only when the syntax is fine, so one
+		// bad URL never yields two errors.
+		if u := c.Upstreams[i].URL; u != "" && checkHTTPURL(u, true) == nil {
+			if err := checkTransport(u, c.AllowInsecureHTTP); err != nil {
+				add("upstreams[%d].url: %v", i, err)
+			}
+		}
 	}
 	// No upstream path may be a segment-wise prefix of another.
 	for i := range c.Upstreams {

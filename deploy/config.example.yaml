@@ -3,26 +3,34 @@
 # Address the HTTP server binds to (nginx terminates TLS in front of it).
 listen: 127.0.0.1:8787
 
-# Public base URL as seen by claude.ai or ChatGPT. Absolute http(s), no query/fragment.
+# Public base URL as seen by claude.ai or ChatGPT. Absolute https origin, no
+# path/query/fragment. http is accepted only for loopback hosts (localhost,
+# 127.0.0.0/8, ::1) unless allow_insecure_http is set. The same rule applies to
+# oauth.allowed_redirect_uris and upstreams[].url.
 public_url: https://mcp.example.com
+
+# Accept plain http for non-loopback hosts in the URLs above. Default false;
+# enabling it logs a startup warning. Only for trusted networks.
+# allow_insecure_http: false
 
 log:
   level: info    # debug|info|warn|error (debug enables access log)
   format: json   # json|text
 
 secrets:
-  # Token encryption keys: base64 (standard) of exactly 32 random bytes.
-  # Generate with: openssl rand -base64 32
+  # Token encryption keys live in a file with one base64 (standard) key of
+  # exactly 32 random bytes per line; '#' comments and blank lines are ignored.
+  # Generate a key with: openssl rand -base64 32
   # The first key encrypts; the rest only decrypt (key rotation).
-  # The key below is a DUMMY - REPLACE ME before deploying.
-  token_keys:
-    - "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="  # REPLACE ME
-  # Alternative (set exactly one of token_keys / token_keys_file): a file with
-  # one base64 key per line; '#' comments and blank lines are ignored.
-  # Relative paths are resolved against this config file's directory.
-  # token_keys_file: /etc/tn-mcp-proxy/keys
-  # Under the bundled systemd unit (LoadCredential=keys:...) use:
-  # token_keys_file: /run/credentials/tn-mcp-proxy.service/keys
+  # Known-weak keys (the old published example key, all-zero, repeated-byte or
+  # incrementing patterns) are rejected at startup.
+  # This path is where the bundled systemd unit (LoadCredential=keys:...)
+  # exposes the file; adjust it for other setups. A relative path is resolved
+  # against this config file's directory.
+  token_keys_file: /run/credentials/tn-mcp-proxy.service/keys
+  # Alternative (set exactly one of token_keys / token_keys_file): inline keys.
+  # token_keys:
+  #   - "<output of: openssl rand -base64 32>"
 
 # Durations: 0 or unset means the default; negative values are rejected.
 oauth:

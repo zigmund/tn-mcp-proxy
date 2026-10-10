@@ -150,7 +150,7 @@ func TestE2EOAuthFlow(t *testing.T) {
 listen: 127.0.0.1:0
 public_url: %s
 secrets:
-  token_keys: ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]
+  token_keys: ["`+testKey("e2e")+`"]
 oauth:
   allowed_redirect_uris: ["%s"]
 upstreams:
@@ -446,4 +446,11 @@ upstreams:
 	}
 	assertUpstreamCall(tp.AccessToken)
 	assertUpstreamCall(tp2.AccessToken) // still valid after family revocation
+}
+
+// testKey derives a deterministic, non-patterned 32-byte key from seed, so no
+// key literal lives in the repository.
+func testKey(seed string) string {
+	h := sha256.Sum256([]byte(seed))
+	return base64.StdEncoding.EncodeToString(h[:])
 }

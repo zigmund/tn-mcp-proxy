@@ -17,7 +17,7 @@ Error messages never echo URL or key material.
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
 | `oauth.access_token_ttl` | `1h` | Positive duration |
 | `oauth.refresh_token_ttl` | `720h` | Positive duration |
-| `oauth.code_ttl` | `5m` | Positive duration |
+| `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form |
 | `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback` | Absolute http(s) URLs, no duplicates |
 | `upstreams[]` | at least one | See below |
 | `tls.cert_file`, `tls.key_file` | empty | Set both or neither |
@@ -38,14 +38,14 @@ in logs, `fmt`, JSON and YAML output.
 | Field | Default | Rules |
 |---|---|---|
 | `name` | required | Unique, `[a-z0-9-]+` |
-| `title` | `name` | Shown on the authorize form |
+| `title` | `name` | Shown on the authorize form. Clients select the upstream with the `resource` parameter (`public_url` + `path`), which may be omitted only with exactly one upstream |
 | `path` | required | Matches `^(/[A-Za-z0-9._~-]+)+$`, no `.`/`..` segments, no trailing slash. Must not equal or overlap `/oauth`, `/.well-known`, `/healthz`; no upstream path may be a segment-wise prefix of another |
 | `url` | required | Absolute http(s) URL, no userinfo/fragment |
 | `credentials[]` | at least one non-optional | Headers the user supplies |
 
 Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
-input), `optional`.
+input), `optional`. Each credential becomes one input on the authorize form; values are trimmed and must not contain control characters.
 
 Forbidden credential headers: `Authorization`, `Proxy-Authorization`, `Cookie`,
 `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`,

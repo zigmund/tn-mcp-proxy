@@ -28,6 +28,9 @@ type AuthServerMetadata struct {
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	// AuthorizationResponseIssParameterSupported advertises RFC 9207: the
+	// authorize endpoint adds iss to every authorization response.
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported"`
 }
 
 // metadataDoc is a precomputed static JSON document served at path.
@@ -73,15 +76,16 @@ func buildMetadata(cfg *config.Config) []metadataDoc {
 	// token_endpoint_auth_methods_supported must match what the register and
 	// token endpoints actually implement.
 	as := AuthServerMetadata{
-		Issuer:                            cfg.PublicURL,
-		AuthorizationEndpoint:             cfg.PublicURL + PathAuthorize,
-		TokenEndpoint:                     cfg.PublicURL + PathToken,
-		RegistrationEndpoint:              cfg.PublicURL + PathRegister,
-		ResponseTypesSupported:            []string{"code"},
-		ResponseModesSupported:            []string{"query"},
-		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_post", "client_secret_basic"},
+		Issuer:                 cfg.PublicURL,
+		AuthorizationEndpoint:  cfg.PublicURL + PathAuthorize,
+		TokenEndpoint:          cfg.PublicURL + PathToken,
+		RegistrationEndpoint:   cfg.PublicURL + PathRegister,
+		ResponseTypesSupported: []string{"code"},
+		ResponseModesSupported: []string{"query"},
+		AuthorizationResponseIssParameterSupported: true,
+		GrantTypesSupported:                        []string{"authorization_code", "refresh_token"},
+		CodeChallengeMethodsSupported:              []string{"S256"},
+		TokenEndpointAuthMethodsSupported:          []string{"none", "client_secret_post", "client_secret_basic"},
 	}
 	add(PathAuthServerMetadata, as)
 	// Fallback for MCP 2025-06-18 clients; this is not a full OIDC provider.

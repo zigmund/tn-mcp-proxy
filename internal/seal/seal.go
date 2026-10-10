@@ -57,6 +57,9 @@ const (
 	KindCode    Kind = "code"
 	KindAccess  Kind = "access"
 	KindRefresh Kind = "refresh"
+	// KindAuthRequest seals the validated authorize request carried in the
+	// credentials form's hidden field between GET and POST.
+	KindAuthRequest Kind = "authreq"
 )
 
 var (

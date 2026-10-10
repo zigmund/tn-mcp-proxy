@@ -46,6 +46,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 		mux.Handle("GET "+d.path, d) // also matches HEAD
 		mux.Handle("OPTIONS "+d.path, preflight("GET, HEAD, OPTIONS"))
 	}
+	mux.HandleFunc("GET "+PathAuthorize, s.handleAuthorize) // also matches HEAD
+	mux.HandleFunc("POST "+PathAuthorize, s.handleAuthorize)
 	mux.HandleFunc("POST "+PathRegister, s.handleRegister)
 	mux.Handle("OPTIONS "+PathRegister, preflight("POST, OPTIONS"))
 }

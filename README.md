@@ -270,6 +270,7 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
 
 ## Security notes
 
+- Security audits: [docs/security/](docs/security/README.md).
 - No database or stored credentials; tokens are self-contained sealed blobs.
 - The host sees credentials in plaintext on the authorize form: run the proxy
   only on a host you trust, always behind TLS, and keep `public_url` on `https`

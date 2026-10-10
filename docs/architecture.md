@@ -341,6 +341,8 @@ pruned lazily (at most once a minute, once a second while full).
 
 ## Security considerations
 
+Independent security audits and their outcomes are indexed in [security/](security/README.md).
+
 - **Open relay without an allow-list.** All upstream traffic leaves from the
   proxy's IP and the upstream tools can trade on the account (place and cancel
   orders) and read the portfolio and balances, so a public deployment that

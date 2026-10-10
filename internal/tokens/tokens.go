@@ -22,27 +22,37 @@ type Access struct {
 	Creds    map[string]string `json:"h"` // canonical header name -> value
 }
 
-// Refresh is the payload of a refresh token (seal.KindRefresh).
+// Refresh is the payload of a refresh token (seal.KindRefresh). Refresh
+// tokens are single-use and form chains: Family (random 128-bit, created at
+// code exchange) is shared by every token of one login, and Gen counts
+// rotations (0 for the first token). The token endpoint tracks the highest
+// redeemed Gen per Family in an in-memory cache until Exp; presenting a Gen
+// that is not newer revokes the whole family. The cache is per-process, so a
+// restart forgets it.
 type Refresh struct {
 	Upstream string            `json:"u"` // upstream name
 	ClientID string            `json:"c"` // DCR client_id the token was issued to
 	Creds    map[string]string `json:"h"` // canonical header name -> value
+	Family   string            `json:"f"` // random chain id
+	Gen      int64             `json:"g"` // generation within the chain, starting at 0
+	Exp      int64             `json:"e"` // expiry, unix seconds (mirrors the seal envelope; bounds the cache entry)
 }
 
 // Code is the payload of an authorization code (seal.KindCode). The code
 // expires through the seal envelope (oauth.code_ttl). The token endpoint
 // must check, besides authenticity and expiry, that the presenting client
 // equals ClientID, that redirect_uri equals RedirectURI and that the PKCE
-// code_verifier hashes (S256) to CodeChallenge. Codes are not single-use by
-// themselves (the proxy is stateless); JTI is reserved for optional replay
-// tracking and is not enforced.
+// code_verifier hashes (S256) to CodeChallenge. Codes are single-use: the
+// token endpoint records JTI in an in-memory cache until Exp and rejects a
+// second redemption. The cache is per-process, so a restart forgets it.
 type Code struct {
 	ClientID      string            `json:"c"`  // DCR client_id the code was issued to
 	RedirectURI   string            `json:"r"`  // redirect_uri of the authorization request
 	CodeChallenge string            `json:"ch"` // PKCE S256 challenge, base64url
 	Upstream      string            `json:"u"`  // upstream name
 	Creds         map[string]string `json:"h"`  // canonical header name -> value
-	JTI           string            `json:"j"`  // random unique id
+	JTI           string            `json:"j"`  // random unique id, enforced single-use by the token endpoint
+	Exp           int64             `json:"e"`  // expiry, unix seconds (mirrors the seal envelope; bounds the replay cache entry)
 }
 
 // String redacts the credentials.

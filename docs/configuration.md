@@ -16,8 +16,8 @@ Error messages never echo URL or key material.
 | `secrets.token_keys` | | Base64 (standard) of 32 bytes each; first key encrypts, others only decrypt |
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
 | `oauth.access_token_ttl` | `1h` | Positive duration |
-| `oauth.refresh_token_ttl` | `720h` | Positive duration |
-| `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form |
+| `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry) |
+| `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form. Codes are single-use |
 | `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback` | Absolute http(s) URLs, no duplicates |
 | `upstreams[]` | at least one | See below |
 | `tls.cert_file`, `tls.key_file` | empty | Set both or neither |

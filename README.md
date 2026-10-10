@@ -12,6 +12,28 @@ tn-mcp-proxy does not implement the Tradernet API itself: it fronts Tradernet's
 own [MCP server](https://tradernet.com/tradernet-api/mcp) and forwards MCP
 traffic to it with the user's credential headers attached.
 
+> [!CAUTION]
+> **A public proxy that accepts any upstream credentials is an open relay from
+> your IP.** Every request to Tradernet leaves from this server's IP address, and
+> the upstream tools can trade on the account (place and cancel orders) and read
+> the portfolio and balances. Anyone with valid Tradernet credentials, stolen or
+> their own, can obtain a token and act through your server. The activity
+> originates from your server's IP, so in a broker, exchange or police inquiry it
+> points to you, the operator.
+>
+> Strongly recommended: restrict the server to your own keys with
+> `allowed_values` on the non-secret credential, under `upstreams[].credentials`:
+>
+> ```yaml
+> credentials:
+>   - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
+>   - { header: X-TN-API-Secret, label: API secret, secret: true }
+> ```
+>
+> Otherwise keep the proxy private (VPN, firewall or IP allow-list in front of
+> it). The proxy logs a startup warning for every upstream without an allow-list.
+> See [Restricting access](docs/configuration.md#restricting-access).
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
   <img alt="Flow: you enter Tradernet keys on the proxy's page; it seals them into a token your AI client holds and unseals it on each call." src="docs/images/flow-light.svg">

@@ -335,6 +335,13 @@ pruned lazily (at most once a minute, once a second while full).
 
 ## Security considerations
 
+- **Open relay without an allow-list.** All upstream traffic leaves from the
+  proxy's IP and the upstream tools can trade on the account (place and cancel
+  orders) and read the portfolio and balances, so a public deployment that
+  accepts any valid credentials lets anyone with such credentials act through
+  the operator's server, and the activity points to the operator's IP. Restrict it with `allowed_values` or keep it
+  private; see the warning in the [README](../README.md) and
+  [Restricting access](configuration.md#restricting-access).
 - **Per-process replay state.** The caches live in one process's memory.
   The proxy is meant to run as a single instance; with several replicas a
   code or refresh token could be redeemed once per replica. A restart forgets

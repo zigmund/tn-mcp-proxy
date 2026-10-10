@@ -76,10 +76,16 @@ upstreams:
     url: https://tradernet.com/mcp/tn
     credentials:                   # headers the user types into the form
       - { header: X-TN-API-Key,    label: API key }
+      # WARNING: on a public server, without an allow-list anyone with valid
+      # Tradernet credentials can use this proxy as a relay: every upstream
+      # request leaves from THIS server's IP and the upstream tools can place
+      # and cancel orders and read the portfolio, so the activity points to you.
+      # Set allowed_values below (strongly recommended) or keep the server
+      # private. A startup warning is logged without it.
+      # See docs/configuration.md#restricting-access
       # Optional allow-list (non-secret credentials only): only these values get
       # a token, existing tokens with other values stop working, and the upstream
-      # is not contacted for anything else. Without it anyone with valid
-      # credentials can use this server (a startup warning says so).
+      # is not contacted for anything else.
       # (this line replaces the X-TN-API-Key entry above; do not enable both,
       # a duplicate header is a config error)
       # - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }

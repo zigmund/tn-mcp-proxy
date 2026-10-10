@@ -1,4 +1,4 @@
-package oauth
+package credcheck
 
 import (
 	"strings"

@@ -445,8 +445,9 @@ from responses.
 events reach the client immediately. The upstream transport has no overall
 timeout and no response header timeout (slow tool calls and idle streams are
 legitimate); only dial (10s) and TLS handshake (10s) are bounded, with 30s
-keepalive and up to 64 idle connections per host. Compression is not
-negotiated or touched by the proxy: bytes pass through opaquely. A client
+keepalive and up to 64 idle connections per host. The transport has
+compression handling disabled, so response bytes pass through opaquely (the
+one exception is the opt-in tool error inspection below). A client
 disconnect cancels the upstream request through the request context.
 
 **Upstream 401.** If the upstream answers 401 (the stored credentials were
@@ -455,13 +456,82 @@ revoked or are wrong), its `WWW-Authenticate` is replaced with
 and a warning is logged. claude.ai then re-runs authorization and the user can
 enter new keys.
 
+**Upstream tool errors (`validate.recheck_on_tool_error`).** Tradernet never
+answers 401 for revoked or wrong keys: `tools/call` returns HTTP `200`,
+`Content-Type: application/json` and a JSON-RPC result with `isError: true`.
+Left alone, the connector stays "connected" while every call fails. But a tool
+error alone is not evidence: bad tickers and closed markets produce them too.
+When an upstream sets `validate.recheck_on_tool_error`, a tool error is only a
+trigger and the credential check decides. The error text is never read.
+
+Inspection. A response is inspected only when all of these hold: the request is
+a `POST`, the upstream status is `200`, the media type is `application/json`,
+and the body is at most 64 KiB (read up to the cap plus one byte). The trigger
+is any JSON-RPC response in it (a single object or a batch array) with
+`result.isError == true`. Everything else is forwarded unchanged: a larger body
+is replayed from the buffered prefix and the remainder streamed, so large and
+streaming responses are neither broken nor held back; SSE (`text/event-stream`)
+and every `GET` are never inspected; malformed JSON, non-200 statuses and other
+content types pass through. A body of up to 64 KiB is buffered before
+forwarding (a slow `application/json` response is delayed until it ends or
+passes the cap). The buffering is bounded in size, not in time.
+
+Re-check. On a trigger the handler runs the credential checker shared with the
+authorize form (`internal/credcheck`) for the token's credentials, which are in
+the request context: the MCP session `initialize`, `notifications/initialized`,
+`tools/call` of `validate.tool` and a best-effort `DELETE`, bounded by
+`validate.timeout` and the client's context. Rejected (the check's tool call
+returns `isError`, or an HTTP `401`/`403`): the response becomes the same
+`401 invalid_token` challenge as the upstream-401 path (short `unauthorized`
+body; the upstream body, `Content-Encoding` and `Content-Length` are replaced;
+one warning without any body text, header or credential). Anything else (the
+check accepts, is unavailable, times out, is skipped, or the client is gone)
+forwards the original response, with a debug log of the outcome (a warning for
+"unavailable"). Only responses that carried a tool error wait for the check,
+about 0.4 to 1 s with Tradernet. In the worst case, when the upstream hangs, a
+triggering tool error is held up to `validate.timeout` (default 10 s).
+
+Cost control (in-process, bounded; the rest of the service stays stateless):
+
+- Verdict cache keyed by an HMAC-SHA256 (random per-process key) of the upstream
+  name and the canonical credentials, so plaintext credentials are neither map
+  keys nor logged. Accepted and rejected verdicts live 60 s; "no verdict" 5 s,
+  so an outage is not hammered. At most 4096 entries, oldest evicted first.
+- Concurrent re-checks for the same key share one session (single flight). The
+  session runs detached from any one client and is bounded by
+  `validate.timeout`, so a waiter leaving does not waste it.
+- At most 8 re-checks at once across all upstreams. When saturated the
+  re-check is skipped and the response passes through.
+
+So a burst of tool errors from one token costs at most one validation session
+per minute.
+
+Compression: the stdlib has no brotli, and Tradernet answers `br` when the
+client offers it. For `POST`s of an upstream with the option on, the proxy
+narrows the outbound `Accept-Encoding` to what it can decode: `gzip` if the
+client accepted it (explicit `gzip`/`x-gzip` with q>0, or `*`), otherwise
+`identity`; `br`, `zstd` and `deflate` are dropped. A gzip body is decoded only
+to inspect it (decoded size is capped at 64 KiB too, so a compression bomb is
+not inspected) and the original compressed bytes are forwarded when the
+response is not replaced. `GET` keeps its `Accept-Encoding` untouched, and with
+the option off nothing about compression changes. Trade-off: such a `POST` gets
+gzip or identity bodies, never brotli.
+
+Residual risk: the check reads `isError` on its own tool call as a rejection
+(that is how Tradernet reports bad keys, and what the authorize form does), so
+a transient failure or a throttling/rate-limit error reported that way is
+indistinguishable from a revoked key and forces one unnecessary re-login. That
+is likelier exactly when a burst of failing calls triggers re-checks. Network
+errors, timeouts, 5xx and JSON-RPC errors are "unavailable" and never cause a
+`401`. The cache also means a verdict can be up to 60 s old.
+
 **Errors.**
 
 | Status | When | `WWW-Authenticate` |
 |--------|------|--------------------|
 | 400 | `Upgrade` header present | none |
 | 401 | no Bearer token | `Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource<path>"` |
-| 401 | invalid, expired, wrong kind, wrong upstream, bad payload, missing credentials, or upstream 401 | `Bearer error="invalid_token", error_description="...", resource_metadata="..."` |
+| 401 | invalid, expired, wrong kind, wrong upstream, bad payload, missing credentials, upstream 401, or a tool error confirmed by the credential re-check (`validate.recheck_on_tool_error`) | `Bearer error="invalid_token", error_description="...", resource_metadata="..."` |
 | 404 | path is not exactly `path` | none |
 | 413 | request body over 10 MiB | none |
 | 500 | the sealer itself is broken (server bug) | none |

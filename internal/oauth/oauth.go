@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
+	"github.com/zigmund/tn-mcp-proxy/internal/credcheck"
 	"github.com/zigmund/tn-mcp-proxy/internal/httplog"
 	"github.com/zigmund/tn-mcp-proxy/internal/ratelimit"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
@@ -39,7 +40,7 @@ type Server struct {
 	clientIP func(*http.Request) string
 	limits   map[string]*ratelimit.Limiter
 	// checker verifies credentials on authorize for upstreams with validate.
-	checker *credChecker
+	checker *credcheck.Checker
 }
 
 // Option configures a Server.
@@ -66,7 +67,7 @@ func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger, opts ...Opti
 		cfg: cfg, sealer: sealer, log: log, now: time.Now,
 		codes: newReplayCache(maxReplayEntries), families: newFamilyCache(maxFamilyEntries),
 		clientIP: httplog.NewResolver(cfg.TrustedNets).ClientIP,
-		checker:  newCredChecker(),
+		checker:  credcheck.New(),
 	}
 	for _, o := range opts {
 		o(s)

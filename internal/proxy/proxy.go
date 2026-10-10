@@ -66,6 +66,24 @@ type handler struct {
 	log    *slog.Logger
 	rp     *httputil.ReverseProxy
 	hdrs   []credHeader
+	// rechecker is non-nil when validate.recheck_on_tool_error is set: a tool
+	// error in a 200 response triggers a credential re-check, and a rejection
+	// becomes 401 invalid_token. Nil means the feature is off.
+	rechecker *Rechecker
+}
+
+// Option configures a handler.
+type Option func(*handler)
+
+// WithRechecker shares one Rechecker (verdict cache, in-flight dedup and the
+// concurrency cap) between handlers. Without it each handler with
+// recheck_on_tool_error gets its own.
+func WithRechecker(r *Rechecker) Option {
+	return func(h *handler) {
+		if r != nil {
+			h.rechecker = r
+		}
+	}
 }
 
 type credHeader struct {
@@ -76,7 +94,7 @@ type credHeader struct {
 // New returns the handler for one upstream. The server mounts it at exactly
 // up.Path. publicURL is the externally visible base URL (no trailing slash
 // required).
-func New(up config.Upstream, publicURL string, s *seal.Sealer, log *slog.Logger) (http.Handler, error) {
+func New(up config.Upstream, publicURL string, s *seal.Sealer, log *slog.Logger, opts ...Option) (http.Handler, error) {
 	if s == nil {
 		return nil, errors.New("proxy: nil sealer")
 	}
@@ -99,6 +117,16 @@ func New(up config.Upstream, publicURL string, s *seal.Sealer, log *slog.Logger)
 	}
 	for _, c := range up.Credentials {
 		h.hdrs = append(h.hdrs, credHeader{name: http.CanonicalHeaderKey(c.Header), optional: c.Optional})
+	}
+	for _, o := range opts {
+		o(h)
+	}
+	if up.Validate != nil && up.Validate.RecheckOnToolError {
+		if h.rechecker == nil {
+			h.rechecker = NewRechecker(log)
+		}
+	} else {
+		h.rechecker = nil // the feature is configured per upstream
 	}
 	h.rp = &httputil.ReverseProxy{
 		Rewrite:        h.rewrite,
@@ -287,6 +315,12 @@ func (h *handler) rewrite(pr *httputil.ProxyRequest) {
 		// also sets this; it is explicit here because the headers are rebuilt.
 		hd["User-Agent"] = nil
 	}
+	// Tool error inspection must be able to read POST responses, and the
+	// proxy decodes only gzip: offer upstream nothing else. GET (the SSE
+	// stream) is never inspected and keeps the client's value.
+	if h.rechecker != nil && out.Method == http.MethodPost {
+		hd.Set("Accept-Encoding", narrowAcceptEncoding(strings.Join(hd.Values("Accept-Encoding"), ",")))
+	}
 	out.Header = hd
 	for k, v := range creds {
 		hd.Set(k, v)
@@ -302,8 +336,9 @@ func (h *handler) modifyResponse(resp *http.Response) error {
 		// enter new keys.
 		h.log.Warn("upstream rejected credentials")
 		resp.Header.Set("WWW-Authenticate", h.challengeValue("invalid_token", "upstream rejected credentials"))
+		return nil
 	}
-	return nil
+	return h.inspectToolError(resp)
 }
 
 func (h *handler) errorHandler(w http.ResponseWriter, _ *http.Request, err error) {

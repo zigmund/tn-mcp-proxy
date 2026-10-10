@@ -83,6 +83,13 @@ func testUpstream(url string) config.Upstream {
 // a proxy in front of it.
 func newEnv(t *testing.T, backend http.HandlerFunc) *env {
 	t.Helper()
+	return newEnvUp(t, backend, nil)
+}
+
+// newEnvUp is newEnv with a hook to adjust the upstream config before the
+// proxy handler is built.
+func newEnvUp(t *testing.T, backend http.HandlerFunc, mutate func(*config.Upstream), opts ...Option) *env {
+	t.Helper()
 	e := &env{now: new(atomic.Int64), logs: &syncBuf{}}
 	e.now.Store(1_800_000_000)
 
@@ -92,6 +99,7 @@ func newEnv(t *testing.T, backend http.HandlerFunc) *env {
 		e.reqs = append(e.reqs, seen{r.Method, r.RequestURI, r.Host, r.Header.Clone(), string(body)})
 		e.mu.Unlock()
 		if backend != nil {
+			r.Body = io.NopCloser(strings.NewReader(string(body))) // backends may re-read it
 			backend(w, r)
 			return
 		}
@@ -106,8 +114,11 @@ func newEnv(t *testing.T, backend http.HandlerFunc) *env {
 		t.Fatal(err)
 	}
 	e.up = testUpstream(back.URL)
+	if mutate != nil {
+		mutate(&e.up)
+	}
 	log := slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h, err := New(e.up, publicURL+"/", e.sealer, log)
+	h, err := New(e.up, publicURL+"/", e.sealer, log, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

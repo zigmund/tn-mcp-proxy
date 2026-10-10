@@ -23,7 +23,8 @@ import (
 // refused instead of guessed at: a body that is not a JSON object or a
 // non-empty array of objects gets 400 -32700, a duplicate or mistyped
 // structural key (method, params, arguments) gets 400 -32600. Structural keys
-// are matched exactly, as strict parsers do.
+// are matched exactly, as strict parsers do, and a key that only equals one
+// under case folding (METHOD, Params, argumentſ) is refused with -32600 too.
 //
 // A compressed body cannot be inspected and is refused with 415.
 func (h *handler) inspectToolArguments(w http.ResponseWriter, r *http.Request, maxBody int64) bool {
@@ -138,6 +139,19 @@ func checkToolArguments(body []byte, forbidden []string) *rejection {
 	return errParse
 }
 
+// isKeyVariant reports whether k is not exactly one of the structural names
+// but equals one of them under Unicode case folding (METHOD, Params, paramſ).
+// A parser that matches keys case-insensitively would read such a key as the
+// structural one, so it is refused rather than ignored.
+func isKeyVariant(k string, names ...string) bool {
+	for _, n := range names {
+		if k != n && strings.EqualFold(k, n) {
+			return true
+		}
+	}
+	return false
+}
+
 var errNotObject = errors.New("not an object")
 
 // eachMember calls fn for every member of the JSON object raw, with the
@@ -169,6 +183,7 @@ func checkMessage(raw []byte, forbidden []string, single bool) *rejection {
 	var method, params, id json.RawMessage
 	var dup bool
 	err := eachMember(raw, func(k string, v json.RawMessage) {
+		dup = dup || isKeyVariant(k, "method", "params")
 		switch k {
 		case "method":
 			dup = dup || method != nil
@@ -200,6 +215,7 @@ func checkMessage(raw []byte, forbidden []string, single bool) *rejection {
 	var args json.RawMessage
 	dup = false
 	if err := eachMember(params, func(k string, v json.RawMessage) {
+		dup = dup || isKeyVariant(k, "arguments")
 		if k == "arguments" {
 			dup = dup || args != nil
 			args = v

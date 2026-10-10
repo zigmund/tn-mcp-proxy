@@ -467,8 +467,10 @@ and rejects the whole request with 400 and a JSON-RPC error (-32602) when a
 parser may differ from Go's: a body that is not valid UTF-8 JSON, or not an
 object or non-empty array of objects, gets -32700; a duplicate `method` or
 `params` key in any message, a duplicate `arguments` key in a `tools/call`
-(keys matched exactly, as strict parsers do) or a non-string `method` gets
--32600. A body with a `Content-Encoding` other than
+(keys matched exactly, as strict parsers do), a non-string `method`, or a key
+of any message, or of a `tools/call`'s `params`, that equals `method`, `params`
+or `arguments` only under case folding (`METHOD`, `paramſ`) gets -32600. A
+body with a `Content-Encoding` other than
 `identity` cannot be inspected and gets 415. Well-formed messages with other
 methods pass. Because the body is held in memory, each in-flight POST costs up
 to `limits.max_request_body`. Allowed bodies are forwarded as the same bytes with an exact

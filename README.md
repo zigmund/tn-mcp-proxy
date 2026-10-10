@@ -100,6 +100,10 @@ upstreams:
     validate: { tool: get_auth_info }   # check the keys with Tradernet before issuing a token
 ```
 
+To accept only your own API key, add `allowed_values: ["REPLACE_WITH_YOUR_API_KEY"]`
+to the `X-TN-API-Key` credential (see
+[Restricting access](docs/configuration.md#restricting-access)).
+
 Generate the token key (base64 of 32 random bytes) into a root-only file, one
 key per line:
 
@@ -242,6 +246,13 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   With it, a code is issued only for credentials the upstream accepts (the check
   is read-only, fails closed and never follows redirects; see
   [docs/configuration.md](docs/configuration.md#credential-validation)).
+- Optionally restrict who can use an upstream with `allowed_values` on a
+  non-secret credential (for example your own API key). Credentials outside the
+  list get no token, and existing tokens stop working once a value is removed.
+  Recommended for a single-user deployment that is reachable from the internet;
+  without it, anyone with valid upstream credentials can use the server (and its
+  IP) and the proxy logs a startup warning. See
+  [docs/configuration.md](docs/configuration.md#restricting-access).
 - Run a single instance. Single-use authorization codes and refresh-token
   families are tracked in bounded in-memory replay caches, so several instances
   would not see each other's usage.

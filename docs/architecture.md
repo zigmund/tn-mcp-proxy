@@ -64,6 +64,16 @@ After that, errors are redirected to the `redirect_uri` with `error`,
 normalization); it may be omitted only when exactly one upstream is
 configured.
 
+**Allow-list.** If a credential has `allowed_values`, `POST /oauth/authorize`
+checks the collected values (`Upstream.CredsAllowed`: exact match after the
+form's trimming, constant-time per candidate) after the length checks and
+before the upstream validation call and before sealing. A mismatch re-renders
+the form with the same message as a rejected credential, so the response does
+not reveal that a list exists, and the upstream is never contacted for foreign
+keys. The same check runs in the `refresh_token` grant (`invalid_grant`) and in
+the proxy's `authenticate` (`401 invalid_token`); see Token endpoint and
+Proxying.
+
 **ChatGPT and RFC 9207.** ChatGPT uses the stable redirect URI
 `https://chatgpt.com/connector_platform_oauth_redirect` only with servers that
 implement issuer identification (RFC 9207); otherwise it may fall back to a
@@ -423,7 +433,11 @@ as a `seal.KindAccess` token into `tokens.Access`. Checks: authentic and
 unexpired, `Upstream` equals the upstream name, every non-optional credential
 header present in the token (values with CR/LF/NUL are rejected; the log names
 only the header). Only headers configured for the upstream are injected;
-extras in the token are ignored. A payload that does not decode (for example
+extras in the token are ignored. If any credential has `allowed_values`, the
+token's values must match them (`Upstream.CredsAllowed`), otherwise the answer
+is `401 invalid_token` like any invalid token; removing a value from the list
+therefore cuts off existing tokens at the next request, without a revocation
+list. The refresh grant applies the same check (`invalid_grant`). A payload that does not decode (for example
 after a deploy changed its shape) is logged at error level and answered like
 any invalid token, so the client re-authorizes.
 

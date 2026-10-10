@@ -233,6 +233,13 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (map[stri
 		}
 		creds[c.name] = v
 	}
+	// Operator allow-list: a value removed from allowed_values cuts existing
+	// tokens off. Same answer as any other invalid token.
+	if !h.up.CredsAllowed(creds) {
+		h.log.Info("token credentials not in allowed_values", "upstream", h.up.Name)
+		h.challenge(w, "invalid_token", "token invalid")
+		return nil, false
+	}
 	return creds, true
 }
 

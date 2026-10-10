@@ -62,7 +62,8 @@ in logs, `fmt`, JSON and YAML output.
 
 Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
-input), `optional`. Each credential becomes one input on the authorize form; values are trimmed and must not contain control characters.
+input), `optional`, `allowed_values` (optional list of accepted values, see
+[Restricting access](#restricting-access)). Each credential becomes one input on the authorize form; values are trimmed and must not contain control characters.
 
 `validate` fields: `tool` (required, MCP tool called with the entered
 credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
@@ -76,6 +77,41 @@ Forbidden credential headers: `Authorization`, `Proxy-Authorization`, `Cookie`,
 `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`,
 `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Accept`, `Mcp-Session-Id`,
 `Mcp-Protocol-Version`, `Forwarded`, `X-Real-IP` and `X-Forwarded-*`.
+
+## Restricting access
+
+By default anyone whose credentials work upstream can obtain a token. The form
+checks the credentials against the upstream (see below) but not whose they are,
+and the upstream then sees requests coming from this server's IP. To restrict
+who can use the server, for example when it is public but only meant for you,
+list the accepted values on a non-secret credential:
+
+```yaml
+credentials:
+  - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
+  - { header: X-TN-API-Secret, label: API secret, secret: true }
+```
+
+Rules:
+
+- `allowed_values` is allowed only on credentials with `secret: false` (the
+  default): the values are stored in the config file, which must not hold
+  secrets. Use the identifying half of a key pair (the API key, not the secret).
+- Each value is non-empty after trimming, has no control characters (CR/LF
+  included), is at most 4096 bytes and is unique after trimming. Errors name
+  entries by index and never print a value.
+- Empty or unset means no restriction. Several credentials may have lists; all
+  of them must match.
+- Matching is exact (case-sensitive) after trimming surrounding whitespace, the
+  same normalization the authorize form applies, and constant-time.
+
+Enforcement: `POST /oauth/authorize` refuses a value outside the list with the
+same message as a rejected credential (the form does not reveal that a list
+exists), before any upstream call and before anything is sealed; the
+`refresh_token` grant answers `invalid_grant`; every proxied request answers
+`401 invalid_token`. So removing a value from the list and restarting cuts off tokens already issued for it.
+
+Without any list on an upstream, startup logs one warning for that upstream.
 
 ## Credential validation
 

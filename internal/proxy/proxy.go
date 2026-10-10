@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
@@ -197,7 +198,15 @@ func bearer(h string) (token string, present bool) {
 		return "", false
 	}
 	// An empty token yields present=true and fails validation as invalid.
-	return strings.TrimSpace(rest), true
+	// Hardening: anything but exactly one token (embedded whitespace or
+	// control characters, as in "Bearer a b") is treated as empty. The sealer
+	// would reject such a value with the same 401 anyway; this keeps the
+	// parser's contract tight. The token grammar is otherwise left to the sealer.
+	rest = strings.TrimSpace(rest)
+	if strings.IndexFunc(rest, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return "", true
+	}
+	return rest, true
 }
 
 // challenge writes a 401 with an RFC 6750 / RFC 9728 WWW-Authenticate header.

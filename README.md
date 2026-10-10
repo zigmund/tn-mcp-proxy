@@ -177,6 +177,23 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
 - Tokens, credentials and query strings are never logged.
 - The service runs as a dynamic unprivileged user under a restrictive systemd sandbox.
 
+## Development
+
+```sh
+make test                 # go test -race ./... (fuzz seed corpora run as ordinary tests)
+make lint                 # golangci-lint, or go vet when it is not installed
+make fuzz FUZZTIME=30s    # run every fuzz target in turn, FUZZTIME each (default 30s)
+```
+
+A full `make fuzz` at the default 30s takes about 7 minutes or more (14 targets, one after another).
+`make fuzz` discovers every `func FuzzXxx(*testing.F)` in the `_test.go` files,
+so new targets need no Makefile change. The targets cover token sealing, bearer
+and client-authentication parsing, PKCE, redirect construction and the
+`/oauth/authorize` and `/oauth/token` handlers. A failing input is saved as
+`testdata/fuzz/<FuzzName>/<hash>` next to the package. Fix the bug, then commit
+that file as a regression seed: `go test` replays it from then on. Fuzzing is
+not part of CI or the release workflow.
+
 ## Releasing
 
 Releases are cut from `main` by a GitHub Actions workflow; see

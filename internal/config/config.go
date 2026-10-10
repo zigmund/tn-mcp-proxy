@@ -31,7 +31,12 @@ const (
 	DefaultRefreshTokenTTL = 720 * time.Hour
 	DefaultMaxSessionTTL   = 2160 * time.Hour // 90 days
 	DefaultCodeTTL         = 5 * time.Minute
-	DefaultReloadInterval  = time.Minute
+	// MaxCodeTTL and MaxAccessTokenTTL are the largest accepted lifetimes: OAuth
+	// 2.1 recommends authorization codes of at most 10 minutes, and an access
+	// token cannot be revoked, so its TTL is the window of a thief.
+	MaxCodeTTL            = 10 * time.Minute
+	MaxAccessTokenTTL     = 24 * time.Hour
+	DefaultReloadInterval = time.Minute
 
 	// DefaultValidateTimeout bounds one credential check; MaxValidateTimeout
 	// is the largest accepted validate.timeout.
@@ -47,6 +52,11 @@ const (
 	DefaultTokenBurst         = 100
 	DefaultAuthorizePerMinute = 30
 	DefaultAuthorizeBurst     = 10
+	// DefaultAuthorizeFormPerMinute/Burst limit GET /oauth/authorize (rendering
+	// the form seals a request, so it is not free), far above the POST limit
+	// because a browser may load the form repeatedly.
+	DefaultAuthorizeFormPerMinute = 300
+	DefaultAuthorizeFormBurst     = 100
 
 	// KeySize is the required decoded size of every token key (AES-256).
 	KeySize = 32
@@ -168,6 +178,8 @@ type RateLimit struct {
 	Register  Limit `yaml:"register"`  // POST /oauth/register
 	Authorize Limit `yaml:"authorize"` // POST /oauth/authorize
 	Token     Limit `yaml:"token"`     // POST /oauth/token
+	// AuthorizeForm limits GET /oauth/authorize (the credentials form).
+	AuthorizeForm Limit `yaml:"authorize_form"`
 
 	// AuthorizeGlobal is the unkeyed ceiling on all POST /oauth/authorize
 	// requests together. Zero values mean a default derived from code_ttl.
@@ -193,6 +205,7 @@ func (r RateLimit) Resolved() RateLimit {
 	fill(&r.Register, DefaultRegisterPerMinute, DefaultRegisterBurst)
 	fill(&r.Authorize, DefaultAuthorizePerMinute, DefaultAuthorizeBurst)
 	fill(&r.Token, DefaultTokenPerMinute, DefaultTokenBurst)
+	fill(&r.AuthorizeForm, DefaultAuthorizeFormPerMinute, DefaultAuthorizeFormBurst)
 	return r
 }
 
@@ -525,6 +538,12 @@ func (c *Config) validate() []error {
 			add("%s: must be a positive duration", d.field)
 		}
 	}
+	if c.OAuth.CodeTTL > MaxCodeTTL {
+		add("oauth.code_ttl: %s exceeds the maximum of %s", c.OAuth.CodeTTL, MaxCodeTTL)
+	}
+	if c.OAuth.AccessTokenTTL > MaxAccessTokenTTL {
+		add("oauth.access_token_ttl: %s exceeds the maximum of %s", c.OAuth.AccessTokenTTL, MaxAccessTokenTTL)
+	}
 	redirects := map[string]int{}
 	for i, r := range c.OAuth.AllowedRedirectURIs {
 		if err := checkHTTPURL(r, true); err != nil {
@@ -572,6 +591,7 @@ func (c *Config) validate() []error {
 		{"register", c.OAuth.RateLimit.Register},
 		{"authorize", c.OAuth.RateLimit.Authorize},
 		{"token", c.OAuth.RateLimit.Token},
+		{"authorize_form", c.OAuth.RateLimit.AuthorizeForm},
 		{"authorize_global", c.OAuth.RateLimit.AuthorizeGlobal},
 	} {
 		if l.v.PerMinute < 0 {

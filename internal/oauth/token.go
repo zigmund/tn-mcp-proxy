@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"mime"
@@ -194,7 +195,9 @@ func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID s
 		grant("PKCE verification failed")
 		return
 	}
-	// The config may have changed since issue (it is reloaded at runtime).
+	// The config may have changed since issue. SIGHUP reloads only TLS, so the
+	// config is fixed for the life of a process and this re-validation matters
+	// across restarts (a code can outlive a restart that changed the allowlist).
 	if !s.redirectAllowed(c, code.RedirectURI) {
 		grant("redirect_uri no longer allowed")
 		return
@@ -305,7 +308,10 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 	case errors.Is(err, errFamilyRevoked):
 		if reuse {
 			// Never log the token itself.
-			s.log.Warn("refresh token reuse detected; family revoked", "client_id", clientID, "family", rt.Family)
+			// Short non-reversible digests only: for public clients the client_id
+			// is the sole client authenticator, and the family id is the key
+			// of the reuse-detection state.
+			s.log.Warn("refresh token reuse detected; family revoked", "client_id", shortID(clientID), "family", shortID(rt.Family))
 		}
 		grant("family revoked")
 		return
@@ -469,4 +475,11 @@ func pkceMatches(verifier, challenge string) bool {
 	sum := sha256.Sum256([]byte(verifier))
 	got := base64.RawURLEncoding.EncodeToString(sum[:])
 	return subtle.ConstantTimeCompare([]byte(got), []byte(challenge)) == 1
+}
+
+// shortID returns the first 8 hex characters of the SHA-256 of id: enough to
+// correlate log lines, useless for recovering or replaying the identifier.
+func shortID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:4])
 }

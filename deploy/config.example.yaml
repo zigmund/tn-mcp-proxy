@@ -38,7 +38,7 @@ oauth:
   refresh_token_ttl: 720h
   # Absolute lifetime of a login from the code exchange; refreshing never extends it.
   # max_session_ttl: 2160h
-  code_ttl: 5m
+  code_ttl: 5m  # at most 10m; access_token_ttl at most 24h
   allowed_redirect_uris:
     - https://claude.ai/api/mcp/auth_callback
     - https://claude.com/api/mcp/auth_callback
@@ -52,6 +52,7 @@ oauth:
   #   register:  { per_minute: 60,  burst: 30 }
   #   token:     { per_minute: 300, burst: 100 }
   #   authorize: { per_minute: 30,  burst: 10 }
+  #   authorize_form: { per_minute: 300, burst: 100 }  # GET /oauth/authorize
 
 # Reverse proxies whose X-Forwarded-For / X-Real-IP are trusted for the client IP
 # (access log and rate limiting). CIDRs or bare IPs; default: loopback only.

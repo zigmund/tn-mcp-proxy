@@ -11,11 +11,10 @@
 <h1>Connect {{.UpstreamTitle}}</h1>
 {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
 <div class="box">
+<p><strong>{{.RedirectHost}}</strong> is requesting access to {{.UpstreamTitle}}.</p>
 <dl class="meta">
-<dt>Application</dt>
-<dd>{{if .ClientName}}{{.ClientName}} <span class="unverified">(name supplied by the application, unverified){{else}}Unnamed application <span class="unverified">(unverified){{end}}</span></dd>
-<dt>Returns to</dt>
-<dd>{{.RedirectHost}}</dd>
+<dt>Application name <span class="unverified">(self-declared, unverified)</span></dt>
+<dd>{{if .ClientName}}{{.ClientName}}{{else}}Unnamed application{{end}}</dd>
 </dl>
 <form method="post" action="{{.Action}}" autocomplete="off">
 <input type="hidden" name="request" value="{{.Request}}">
@@ -24,6 +23,6 @@
 {{end}}<button type="submit">Authorize</button>
 </form>
 </div>
-<p class="hint">These credentials are encrypted into the access tokens issued to the application above and are not stored by this server. Only continue if you started this connection yourself.</p>
+<p class="hint">These credentials are encrypted into the access tokens issued to the application at the address above and are not stored by this server. Only continue if you started this connection yourself.</p>
 </body>
 </html>

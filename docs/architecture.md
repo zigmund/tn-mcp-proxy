@@ -77,9 +77,11 @@ Client ID Metadata Documents are not supported and not advertised, so ChatGPT
 registers through DCR.
 
 **Form.** Fields come from the upstream's `credentials` (secrets are password
-inputs). The page names the upstream (`title`), the application name labelled
-"unverified" (it is attacker-controlled, HTML-escaped) and the host the user
-returns to. The validated request is sealed (`seal.KindAuthRequest`, 15 minute
+inputs). The page leads with the host the user returns to as the identity of the
+application ("<host> is requesting access to <upstream title>"), because
+the application name is attacker-controlled (open DCR; a homoglyph name can
+imitate a known client). The name is shown only as a secondary line labelled
+"self-declared, unverified", stripped of control characters and HTML-escaped. The validated request is sealed (`seal.KindAuthRequest`, 15 minute
 expiry) into a hidden `request` field. Responses carry `Cache-Control:
 no-store`, `X-Frame-Options: DENY` and a CSP with `default-src 'none'`, the
 single inline stylesheet allowed by hash (no inline script),
@@ -179,6 +181,8 @@ credentials are involved.
   `refresh_token` and `response_types` a subset of `code` (which requires `authorization_code`
   among the grants); when omitted the
   response reports both grants (we support refresh, unlike the RFC default).
+  The grants are validated but neither stored in the client id nor enforced:
+  any registered client may use `authorization_code` and `refresh_token`.
   `scope` is ignored. `client_name` is trimmed, stripped of control and
   invisible format characters, capped at 100 runes and shown (HTML-escaped) on
   the authorize page.
@@ -269,7 +273,9 @@ pruned lazily (at most once a minute, once a second while full).
   a revoked family is `invalid_grant`; `g` not greater than the highest used
   generation is a reuse, which revokes the family (recorded in the revocation
   set; the successor held by the legitimate client stops working too; logged
-  at warn with the client id only) and is `invalid_grant`; otherwise
+  at warn with short digests as `client_id` and `family`, the first 8 hex
+  characters of their SHA-256, never the raw values) and is `invalid_grant`;
+  otherwise
   `g` is recorded and the successor `g+1` issued. A refresh loop therefore
   touches one entry, not one per request. A family with no live entry (never
   refreshed, after a restart, or evicted, see Full cache) is accepted as new.
@@ -570,8 +576,13 @@ and computes MACs. All secrets are accepted for opening and MAC verification.
 To rotate: prepend a new secret, deploy, and remove the old one once its tokens
 have expired. Duplicate secrets or key id collisions are rejected at startup.
 
-**Size limit.** Encoded tokens are at most 16 KiB. `Seal` refuses to produce
-larger tokens and `Open` rejects them before decoding.
+**Size limit.** Encoded tokens are at most 16 KiB (`seal.MaxTokenSize`). `Seal`
+refuses to produce larger tokens and `Open` rejects them before decoding.
+Payloads are encoded without HTML escaping (`<`, `>` and `&` stay one byte;
+tokens sealed with escaping still open). The authorize form measures the
+credentials against this cap in the worst-case code, access and refresh token
+before any upstream check and answers "The credentials together are too long." instead of
+failing later with `server_error`.
 
 **Strict encoding.** Only canonical base64url is accepted (no padding, CR/LF or
 non-zero trailing bits), so each token has exactly one string form and is safe
@@ -620,7 +631,7 @@ holds the current `*tls.Certificate` in an `atomic.Pointer` and exposes it as
 `tls.Config.GetCertificate`; `Server.EnableTLS` makes `Serve` use `ServeTLS` with
 that config (TLS 1.2 minimum, `h2` and `http/1.1` ALPN). The pair is loaded
 before listening and a failure is fatal. A watcher goroutine tied to the run
-context compares mtime and size of both files (symlinks followed) every
+context hashes the contents of both files (symlinks followed) every
 `tls.reload_interval` and swaps in a valid new pair; `SIGHUP` registers as an
 `OnReload` hook that forces a reload. A failed reload keeps the old certificate
 and is retried on the next tick. The watcher stops on shutdown.

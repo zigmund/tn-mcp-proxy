@@ -16,15 +16,16 @@ Error messages never echo URL or key material.
 | `allow_insecure_http` | `false` | Top-level bool. Accept plain `http://` for non-loopback hosts in `public_url`, `oauth.allowed_redirect_uris` and `upstreams[].url`. Logs one startup warning. See [Transport security](#transport-security) |
 | `secrets.token_keys` | | Base64 (standard) of 32 random bytes each (`openssl rand -base64 32`); first key encrypts, others only decrypt. Known-weak keys are rejected, see below |
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
-| `oauth.access_token_ttl` | `1h` | Positive duration |
+| `oauth.access_token_ttl` | `1h` | Positive duration, at most `24h` (access tokens cannot be revoked, so this is a thief's window) |
 | `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry), but never beyond `oauth.max_session_ttl` |
 | `oauth.max_session_ttl` | `2160h` (90 days) | Positive duration; absolute lifetime of a login, counted from the code exchange and never extended by refreshing. Once it has passed, the refresh grant fails with `invalid_grant` and the user must reconnect; refresh and access token expiry (and `expires_in`) are capped at the session end. Refresh tokens issued before this setting existed carry no start time: their first refresh after an upgrade starts a fresh window, so existing logins get a full `max_session_ttl` from then on. There is no upper bound |
-| `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form. Codes are single-use |
+| `oauth.code_ttl` | `5m` | Positive duration, at most `10m` (OAuth 2.1); lifetime of an authorization code from submission of the credentials form. Codes are single-use |
 | `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute https URLs (http only for loopback or with `allow_insecure_http`), no duplicates |
 | `oauth.rate_limit.disabled` | `false` | Turns the in-app per-IP rate limiting of the OAuth endpoints off. See [Rate limiting](#rate-limiting) |
 | `oauth.rate_limit.register` | `per_minute: 60`, `burst: 30` | Limit for `POST /oauth/register` |
 | `oauth.rate_limit.token` | `per_minute: 300`, `burst: 100` | Limit for `POST /oauth/token` |
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
+| `oauth.rate_limit.authorize_form` | `per_minute: 300`, `burst: 100` | Limit for `GET /oauth/authorize` (rendering the form; each one seals a request, hence a generous but finite limit) |
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on all `POST /oauth/authorize` requests together. See [Rate limiting](#rate-limiting) |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
@@ -296,8 +297,10 @@ default, so list loopback too if the local proxy still connects from there.
 `POST /oauth/register`, `POST /oauth/authorize` (the credentials form) and
 `POST /oauth/token` are limited per client IP with a token bucket: `per_minute`
 is the sustained rate and `burst` the number of requests that may arrive at
-once. Each endpoint has its own bucket set. `GET /oauth/authorize`, the
-metadata documents, `/healthz`, CORS preflights, non-POST requests to the token
+once. Each endpoint has its own bucket set. `GET /oauth/authorize` (rendering
+the form, which seals a request) has its own, much larger budget
+(`oauth.rate_limit.authorize_form`), and is not counted against the global
+ceiling below. The metadata documents, `/healthz`, CORS preflights, non-POST requests to the token
 endpoint (a plain 405) and the proxied MCP paths are not limited.
 
 IPv4 clients are keyed by address. IPv6 clients are charged against three
@@ -359,6 +362,7 @@ oauth:
     register:  { per_minute: 60,  burst: 30 }
     token:     { per_minute: 300, burst: 100 }
     authorize: { per_minute: 30,  burst: 10 }
+    authorize_form: { per_minute: 300, burst: 100 }
     # authorize_global: { per_minute: 2500, burst: 2500 }  # default: derived from code_ttl
     # disabled: true
 trusted_proxies: ["127.0.0.0/8", "::1/128"]

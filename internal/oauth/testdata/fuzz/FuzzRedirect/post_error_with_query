@@ -1,0 +1,6 @@
+go test fuzz v1
+string("https://claude.ai/api/mcp/auth_callback?x=1")
+string("s")
+string("access_denied")
+string("d")
+byte(3)

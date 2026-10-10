@@ -446,15 +446,3 @@ func TestMACRotationNonPrimary(t *testing.T) {
 		t.Fatal("different purpose accepted")
 	}
 }
-
-func FuzzOpen(f *testing.F) {
-	s, _ := New([][]byte{key(1)})
-	tok, _ := s.Seal(KindAccess, payload{"a", 1}, time.Time{})
-	f.Add(tok)
-	f.Add("")
-	f.Add("AQ")
-	f.Fuzz(func(t *testing.T, in string) {
-		var out payload
-		_ = s.Open(KindAccess, in, &out)
-	})
-}

@@ -708,3 +708,49 @@ func TestNewValidation(t *testing.T) {
 		t.Errorf("good config: %v", err)
 	}
 }
+
+func TestBearer(t *testing.T) {
+	tests := []struct {
+		name, header string
+		token        string
+		present      bool
+	}{
+		{"clean", "Bearer abc", "abc", true},
+		{"lowercase scheme", "bearer abc", "abc", true},
+		{"uppercase scheme", "BEARER abc", "abc", true},
+		{"surrounding space trimmed", "  Bearer abc  ", "abc", true},
+		{"empty token", "Bearer ", "", true},
+		{"scheme only", "Bearer", "", true},
+		{"embedded space", "Bearer a b", "", true},
+		{"nbsp inside", "Bearer a\u00a0b", "", true},
+		{"tab inside", "Bearer a\tb", "", true},
+		{"control inside", "Bearer a\x00b", "", true},
+		{"tab after scheme", "Bearer\tabc", "", false},
+		{"other scheme", "Basic abc", "", false},
+		{"empty header", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tok, ok := bearer(tc.header)
+			if tok != tc.token || ok != tc.present {
+				t.Errorf("bearer(%q) = (%q, %v), want (%q, %v)", tc.header, tok, ok, tc.token, tc.present)
+			}
+		})
+	}
+}
+
+func TestBearerWithEmbeddedSpaceIs401(t *testing.T) {
+	e := newEnv(t, nil)
+	tok := e.access(t, goodCreds())
+	resp := e.do(t, "POST", "/mcp/tn", "Bearer "+tok+" extra", nil, "{}")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	want := `Bearer error="invalid_token", error_description="token invalid", ` + meta
+	if got := resp.Header.Get("WWW-Authenticate"); got != want {
+		t.Errorf("WWW-Authenticate %q", got)
+	}
+	if n := len(e.requests()); n != 0 {
+		t.Errorf("%d requests reached the upstream", n)
+	}
+}

@@ -1,0 +1,2 @@
+go test fuzz v1
+string("client_id={CID}&response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback%2F..%2Fx&code_challenge={CHALLENGE}&code_challenge_method=S256")

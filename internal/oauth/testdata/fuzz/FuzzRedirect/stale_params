@@ -1,0 +1,6 @@
+go test fuzz v1
+string("https://claude.ai/api/mcp/auth_callback?code=old&state=old&iss=old&error=old&keep=1&keep=2")
+string("")
+string("c")
+string("")
+byte(0)

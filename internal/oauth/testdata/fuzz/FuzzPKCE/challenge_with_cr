@@ -1,0 +1,3 @@
+go test fuzz v1
+string("verifier-verifier-verifier-verifier-verifier-0123")
+string("NAlM6ih\rqPlS_acC7V-TtCTWHs5D5eDpQI3Mh3JoLJcc")

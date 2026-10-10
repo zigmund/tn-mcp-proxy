@@ -193,5 +193,5 @@ func (s *Server) denyToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) denyAuthorize(w http.ResponseWriter, _ *http.Request) {
-	s.writeErrorPage(w, http.StatusTooManyRequests, "Too many requests. Please wait a moment and try again.")
+	s.writeErrorPage(w, http.StatusTooManyRequests, newLocale(defaultLang), uiMsg(msgTooManyRequests))
 }

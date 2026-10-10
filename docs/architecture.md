@@ -100,7 +100,13 @@ families (see Token endpoint).
 
 ### Authorization
 
-`GET /oauth/authorize` validates the request and renders the credentials form;
+`GET /oauth/authorize` validates the request and renders the credentials form
+(host of the redirect URI first, the self-declared client name marked
+unverified, one input per credential, then the "What this server logs" panel
+when `audit.enabled`, the operator's `oauth.page` notice and contact, and a hint
+that matches the audit mode). Page text comes from a small message catalog
+keyed by id (`internal/oauth/messages.go`), formatted in Go and HTML-escaped by
+`html/template`; the page is one inline stylesheet allowed by a CSP hash;
 `POST /oauth/authorize` turns the submitted form into an authorization code.
 Other methods get `405`. No CORS headers are set (the endpoint is only
 navigated to). Both methods are rate limited per client IP, each with its own

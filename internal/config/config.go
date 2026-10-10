@@ -205,6 +205,8 @@ type OAuth struct {
 	CodeTTL             time.Duration `yaml:"code_ttl"`
 	AllowedRedirectURIs []string      `yaml:"allowed_redirect_uris"`
 	RateLimit           RateLimit     `yaml:"rate_limit"`
+	// Page is the operator's contact and notice on the authorize page.
+	Page Page `yaml:"page"`
 }
 
 // RateLimit configures the per-IP token-bucket limits of the OAuth endpoints.
@@ -314,6 +316,25 @@ func (u Upstream) AuditedCredentials() []Credential {
 	for _, cr := range u.Credentials {
 		if cr.Audit && !cr.Secret {
 			out = append(out, cr)
+		}
+	}
+	return out
+}
+
+// NeverLoggedLabels returns the labels (the header name when a credential has
+// no label) of the credentials whose values the server never writes to its
+// logs: every credential that is not audited, in config order. Secret ones
+// included; none of them is stored either, they only travel in the tokens.
+func (u Upstream) NeverLoggedLabels() []string {
+	var out []string
+	for _, cr := range u.Credentials {
+		if cr.Audit && !cr.Secret {
+			continue
+		}
+		if cr.Label != "" {
+			out = append(out, cr.Label)
+		} else {
+			out = append(out, cr.Header)
 		}
 	}
 	return out
@@ -469,6 +490,7 @@ func (c *Config) applyDefaults() {
 		c.Log.Level = DefaultLogLevel
 	}
 	c.Audit.Retention = strings.TrimSpace(c.Audit.Retention)
+	c.OAuth.Page.normalize()
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	if c.Log.Format == "" {
 		c.Log.Format = DefaultLogFormat
@@ -651,6 +673,7 @@ func (c *Config) validate() []error {
 	}
 
 	errs = append(errs, c.Audit.validate()...)
+	errs = append(errs, c.OAuth.Page.validate()...)
 	if c.Audit.Enabled && (c.Log.Level == "warn" || c.Log.Level == "error") {
 		add("audit.enabled: needs log.level debug or info, audit records are written at info level")
 	}

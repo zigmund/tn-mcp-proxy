@@ -27,6 +27,8 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
 | `oauth.rate_limit.authorize_form` | `per_minute: 300`, `burst: 100` | Limit for `GET /oauth/authorize` (rendering the form; each one seals a request, hence a generous but finite limit) |
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on the `POST /oauth/authorize` submissions that are about to get a code. `burst` defaults to `per_minute`; setting `burst` needs `per_minute` too. See [Rate limiting](#rate-limiting) |
+| `oauth.page.contact` | | Optional operator contact on the authorize page: `mailto:` address or `https://` URL, at most 256 bytes, no whitespace, control or Unicode format characters. Shown as a link (the text drops `mailto:`) under "Notice from the operator" |
+| `oauth.page.notice` | | Optional notice on the authorize page: a map of lowercase language code (2 or 3 letters) to plain text, each at most 4 KiB of UTF-8 without control characters other than newline and tab, at most 32 languages. Paragraphs are separated by blank lines. Text is HTML-escaped, never interpreted. When `notice` is set it must contain an `en` entry (config error otherwise); the page shows the entry for its language, else `en`. Unicode format characters (bidi controls, zero-width) are rejected |
 | `audit.enabled` | `false` | Opt-in audit log tying client IPs to audited credential values. Needs `log.level` `debug` or `info`. See [Audit log](#audit-log) |
 | `audit.retention` | | Required when `audit.enabled`. Short free text, at most 64 characters, printable, no control characters (for example `12 months`). It states your retention of the audit records. The proxy does not enforce it: your log rotation does |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
@@ -437,6 +439,15 @@ upstreams:
       - { header: X-TN-API-Key, label: API key, audit: true }      # value is logged
       - { header: X-TN-API-Secret, label: API secret, secret: true }
 ```
+
+While `audit.enabled` is true the authorize page always shows a "What this
+server logs" panel before the Authorize button: the time and client IP of each
+request, "Your <label>" for each audited credential, that tools called are
+logged, "Logs are kept for <retention>", and "Never logged or stored:" with the
+labels of every other credential (secret ones and, for example, an optional
+SID). It cannot be turned off separately, so a user always sees what is
+recorded. The hint above the button then says that, apart from what the panel
+lists, the server does not log or store any credential values.
 
 Records are written at `info` level with `msg` `audit` and an `event` field, so
 they are kept at the default `log.level` (`audit.enabled` is rejected with

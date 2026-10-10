@@ -140,7 +140,7 @@ func decodeTokens(t *testing.T, rec *httptest.ResponseRecorder) tokenPair {
 }
 
 var (
-	labelRe     = regexp.MustCompile(`<label for="([^"]+)">([^<]*)</label>`)
+	labelRe     = regexp.MustCompile(`<label for="([^"]+)">([^<]*?)(?: <span class="opt">[^<]*</span>)?</label>`)
 	hiddenRe    = regexp.MustCompile(`<input type="hidden" name="([^"]+)" value="([^"]*)">`)
 	inputTypeRe = regexp.MustCompile(`<input id="([^"]+)" name="[^"]+" type="([^"]+)"`)
 )

@@ -44,6 +44,17 @@ oauth:
     - https://claude.com/api/mcp/auth_callback
     - https://chatgpt.com/connector_platform_oauth_redirect
 
+  # Optional operator notice and contact on the authorize page (plain text,
+  # HTML-escaped). contact: mailto: or https:// URL, shown as a link. notice:
+  # lowercase language code (2-3 letters) -> text of at most 4 KiB; paragraphs
+  # are split on blank lines. An "en" entry is required whenever notice is set;
+  # the page shows its language, else "en". See docs/configuration.md.
+  # page:
+  #   contact: "mailto:ops@example.org"
+  #   notice:
+  #     en: |
+  #       Free, as is, no guarantees.
+
   # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
   # /oauth/token, and of GET /oauth/authorize (429 + Retry-After). Zero or unset
   # values mean these defaults; they are generous because claude.ai and ChatGPT

@@ -68,9 +68,15 @@ configured.
 checks the collected values (`Upstream.CredsAllowed`: exact match after the
 form's trimming, constant-time per candidate) after the length checks and
 before the upstream validation call and before sealing. A mismatch re-renders
-the form with the same message as a rejected credential, so the response does
-not reveal that a list exists, and the upstream is never contacted for foreign
-keys. The same check runs in the `refresh_token` grant (`invalid_grant`) and in
+the form with the same message as a rejected credential, and the upstream is
+never contacted for foreign keys. Status and message are identical, but the
+timing is not: a list refusal returns at once, while a listed key with a wrong
+secret waits for the upstream check, so a patient observer can infer that a
+list exists and whether a candidate key is on it (the comparison itself is
+constant-time, and the secret is still required). The list gates token issuance
+only and is effective only together with `validate` (a config without it is
+rejected at load); request content is the business of `forbidden_arguments`,
+see Proxying. The same check runs in the `refresh_token` grant (`invalid_grant`) and in
 the proxy's `authenticate` (`401 invalid_token`); see Token endpoint and
 Proxying.
 
@@ -339,7 +345,8 @@ pruned lazily (at most once a minute, once a second while full).
   proxy's IP and the upstream tools can trade on the account (place and cancel
   orders) and read the portfolio and balances, so a public deployment that
   accepts any valid credentials lets anyone with such credentials act through
-  the operator's server, and the activity points to the operator's IP. Restrict it with `allowed_values` or keep it
+  the operator's server, and the activity points to the operator's IP. Restrict it with `allowed_values` (which needs
+  `validate`, and `forbidden_arguments` for request content) or keep it
   private; see the warning in the [README](../README.md) and
   [Restricting access](configuration.md#restricting-access).
 - **Per-process replay state.** The caches live in one process's memory.
@@ -447,6 +454,25 @@ end). Any other method (HEAD, OPTIONS, PUT, PATCH, TRACE, ...) gets 405 with
 parsed and the upstream is never contacted. OPTIONS is included: MCP clients do
 not use browser CORS preflight for this endpoint. The request body is capped at
 `limits.max_request_body` (10 MiB by default; 413 beyond that).
+
+**Request inspection.** Bodies are otherwise relayed verbatim, and some
+upstreams (Tradernet among them) accept credentials as tool arguments, which
+would bypass the credentials injected as headers. With `forbidden_arguments`
+set, `inspectToolArguments` (`internal/proxy/toolargs.go`) reads a POST body
+once, within the body cap, after the limits have admitted the request. It
+walks a single JSON-RPC message or a batch token by token (no struct decoding)
+and rejects the whole request with 400 and a JSON-RPC error (-32602) when a
+`tools/call` has a `params.arguments` key matching a forbidden name
+(case-insensitive, even with a null value). It fails closed, since the upstream
+parser may differ from Go's: a body that is not valid UTF-8 JSON, or not an
+object or non-empty array of objects, gets -32700; a duplicate `method` or
+`params` key in any message, a duplicate `arguments` key in a `tools/call`
+(keys matched exactly, as strict parsers do) or a non-string `method` gets
+-32600. A body with a `Content-Encoding` other than
+`identity` cannot be inspected and gets 415. Well-formed messages with other
+methods pass. Because the body is held in memory, each in-flight POST costs up
+to `limits.max_request_body`. Allowed bodies are forwarded as the same bytes with an exact
+`Content-Length`. Log lines name the upstream and the argument, never values.
 
 **Limits.** One shared `proxy.Limits` (`limits` config section) guards all
 upstream handlers. Per request: per-IP token bucket (before the token is

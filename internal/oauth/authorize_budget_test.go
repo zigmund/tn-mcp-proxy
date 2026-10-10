@@ -16,7 +16,7 @@ func TestAuthorizeOverBudgetCredentialsGetFormError(t *testing.T) {
 	e := newAZ(t)
 	long := strings.Repeat("a", maxCredLen)
 	other := strings.Repeat("b", maxCredLen) // non-secret fields are re-rendered
-	// Three maximal values (the audit PoC) cannot fit in a 16 KiB token.
+	// Three maximal values cannot fit in a 16 KiB token.
 	form := url.Values{
 		requestField: {hidden(t, e.get(e.query(nil)).Body.String())},
 		"cred_0":     {long}, "cred_1": {other}, "cred_2": {other},

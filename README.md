@@ -22,12 +22,16 @@ traffic to it with the user's credential headers attached.
 > points to you, the operator.
 >
 > Strongly recommended: restrict the server to your own keys with
-> `allowed_values` on the non-secret credential, under `upstreams[].credentials`:
+> `allowed_values` on the non-secret credential, together with `validate` (the
+> allow-list is rejected at startup without it) and `forbidden_arguments`:
 >
 > ```yaml
 > credentials:
 >   - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
 >   - { header: X-TN-API-Secret, label: API secret, secret: true }
+>   - { header: X-TN-SID, label: SID, optional: true }
+> validate: { tool: get_auth_info }
+> forbidden_arguments: [api_key, api_secret]
 > ```
 >
 > Otherwise keep the proxy private (VPN, firewall or IP allow-list in front of
@@ -123,7 +127,8 @@ upstreams:
 ```
 
 To accept only your own API key, add `allowed_values: ["REPLACE_WITH_YOUR_API_KEY"]`
-to the `X-TN-API-Key` credential (see
+to the `X-TN-API-Key` credential and `forbidden_arguments: [api_key, api_secret]`
+to the upstream; the allow-list requires `validate` (see
 [Restricting access](docs/configuration.md#restricting-access)).
 
 Generate the token key (base64 of 32 random bytes) into a root-only file, one
@@ -134,17 +139,25 @@ sudo install -d -m 0755 /etc/tn-mcp-proxy
 openssl rand -base64 32 | sudo install -m 0600 -o root -g root /dev/stdin /etc/tn-mcp-proxy/keys
 ```
 
-Install the config so the service's dynamic user can read it (`0644`, root-owned):
+Install the config so the service can read it but other local users cannot.
+If the service runs as a dedicated user and group (for example via `User=` and
+`Group=` in a drop-in), use `0640` with that group:
 
 ```sh
-sudo install -m 0644 -o root -g root config.yaml /etc/tn-mcp-proxy/config.yaml
+sudo install -m 0640 -o root -g tn-mcp-proxy config.yaml /etc/tn-mcp-proxy/config.yaml
 ```
+
+With the bundled unit's `DynamicUser=` there is no fixed group to grant, so the
+simplest setup is `0644`, root-owned (`sudo install -m 0644 -o root -g root ...`).
+That exposes the file to every local user of the host, including any
+`allowed_values` entry (your API key); prefer the dedicated group when other
+people have shell access.
 
 Keep the keys out of `config.yaml`: the bundled systemd unit delivers the file
 to the service through `LoadCredential=`, and the config points at it by its
 absolute path (`/run/credentials/tn-mcp-proxy.service/keys`; environment
 variables are not expanded in the config). The config itself then holds no
-secrets, which is what makes `0644` safe. Anyone with the keys can decrypt every issued token,
+secrets, which is what makes `0644` tolerable. Anyone with the keys can decrypt every issued token,
 so treat them like passwords.
 
 ## Run
@@ -269,7 +282,8 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   is read-only, fails closed and never follows redirects; see
   [docs/configuration.md](docs/configuration.md#credential-validation)).
 - Optionally restrict who can use an upstream with `allowed_values` on a
-  non-secret credential (for example your own API key). Credentials outside the
+  non-secret credential (for example your own API key); it requires `validate`
+  and should be paired with `forbidden_arguments`. Credentials outside the
   list get no token, and existing tokens stop working once a value is removed.
   Recommended for a single-user deployment that is reachable from the internet;
   without it, anyone with valid upstream credentials can use the server (and its

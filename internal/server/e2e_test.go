@@ -50,8 +50,22 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 		u.last = r.Header.Clone()
 		u.body = string(b)
 		u.mu.Unlock()
+		// Enough MCP for the credential check: echo the request id, accept
+		// notifications.
+		var m struct {
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(b, &m)
+		if len(m.ID) == 0 {
+			m.ID = json.RawMessage("1")
+		}
+		if strings.HasPrefix(m.Method, "notifications/") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"fake"}}}`)
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"fake"},"content":[{"type":"text","text":"{}"}]}}`, m.ID)
 	}))
 	t.Cleanup(u.srv.Close)
 	return u

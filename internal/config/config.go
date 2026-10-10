@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -224,7 +225,17 @@ type Upstream struct {
 	// Validate, when set, makes the authorize form verify the entered
 	// credentials against the upstream before a code is issued.
 	Validate *Validate `yaml:"validate"`
+	// ForbiddenArguments lists tool argument names (matched case-insensitively)
+	// that the proxy refuses in tools/call requests, so a token holder cannot
+	// pass credentials as tool arguments around the injected headers.
+	ForbiddenArguments []string `yaml:"forbidden_arguments"`
 }
+
+// Limits on forbidden_arguments.
+const (
+	MaxForbiddenArguments   = 32
+	MaxForbiddenArgumentLen = 128
+)
 
 // Validate configures the credential check: one MCP tools/call made with the
 // entered credentials. Tool must be read-only. Timeout bounds the whole check
@@ -754,6 +765,43 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 	if u.Validate != nil {
 		for _, err := range u.Validate.validate() {
 			add("validate.%v", err)
+		}
+	}
+	if u.HasAllowList() && u.Validate == nil {
+		add("allowed_values requires validate (otherwise any secret paired with an allowed key gets a token)")
+	}
+	for _, err := range validateForbidden(u.ForbiddenArguments) {
+		add("forbidden_arguments%v", err)
+	}
+	return errs
+}
+
+// validateForbidden checks forbidden_arguments. Each error starts with an
+// index suffix or a colon, so the caller prefixes the field name.
+func validateForbidden(names []string) []error {
+	var errs []error
+	if len(names) > MaxForbiddenArguments {
+		errs = append(errs, fmt.Errorf(": at most %d names", MaxForbiddenArguments))
+	}
+	for k, n := range names {
+		switch {
+		case n == "":
+			errs = append(errs, fmt.Errorf("[%d]: must not be empty", k))
+		case len(n) > MaxForbiddenArgumentLen:
+			errs = append(errs, fmt.Errorf("[%d]: longer than %d bytes", k, MaxForbiddenArgumentLen))
+		case !utf8.ValidString(n):
+			errs = append(errs, fmt.Errorf("[%d]: invalid UTF-8", k))
+		case n != strings.TrimSpace(n):
+			errs = append(errs, fmt.Errorf("[%d]: must not have leading or trailing whitespace", k))
+		case strings.IndexFunc(n, unicode.IsControl) >= 0:
+			errs = append(errs, fmt.Errorf("[%d]: must not contain control characters", k))
+		default:
+			for j := range k {
+				if strings.EqualFold(names[j], n) {
+					errs = append(errs, fmt.Errorf("[%d]: duplicates forbidden_arguments[%d] (case-insensitive)", k, j))
+					break
+				}
+			}
 		}
 	}
 	return errs

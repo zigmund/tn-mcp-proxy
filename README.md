@@ -3,9 +3,10 @@
 An OAuth 2.1 facade in front of header-authenticated MCP servers. The Tradernet
 MCP (`https://tradernet.com/mcp/tn`) authenticates with static request headers
 (`X-TN-API-Key`, `X-TN-API-Secret`, optionally `X-TN-SID`), which claude.ai
-custom connectors cannot send; they only speak OAuth. tn-mcp-proxy sits between
-the two: it presents a standard OAuth authorization server to claude.ai and
-forwards MCP traffic to the upstream with the user's headers attached.
+and ChatGPT custom connectors cannot send; they only speak OAuth. tn-mcp-proxy
+sits between the two: it presents a standard OAuth authorization server to
+claude.ai or ChatGPT and forwards MCP traffic to the upstream with the user's
+headers attached.
 
 ## How it works
 
@@ -136,6 +137,22 @@ authenticated) inside the tokens that claude.ai holds, and are decrypted only
 to attach them to the request being forwarded. If the upstream later rejects
 them (revoked key), claude.ai re-runs the flow and you can enter new ones.
 
+## Connect ChatGPT
+
+The UI path below may change; follow the current ChatGPT documentation if it differs.
+
+1. In ChatGPT: Settings -> Apps & Connectors -> Advanced -> enable Developer mode.
+2. Create a connector (custom app) with the MCP server URL: `public_url` + the
+   upstream `path`, e.g. `https://mcp.example.com/tn/mcp`. Choose OAuth as the
+   authentication method.
+3. Connect. The browser opens the same authorization page: enter your upstream
+   credentials and submit.
+
+ChatGPT registers itself through dynamic client registration and uses the stable
+redirect URI `https://chatgpt.com/connector_platform_oauth_redirect`, which is
+allowed by default and relies on the RFC 9207 `iss` parameter the proxy
+returns. Credentials are handled as described above.
+
 ## Key rotation
 
 1. Generate a new key and put it first in the keys file; keep the old one below it:
@@ -172,7 +189,7 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   again (its family is forgotten) for up to `oauth.refresh_token_ttl`. Avoid
   casual restarts after a suspected token leak; rotate keys instead (above).
 - Refresh tokens are single-use and rotated on every refresh; presenting an already used one revokes its whole chain (the user reconnects).
-- Redirect URIs are restricted to `oauth.allowed_redirect_uris` (claude.ai and claude.com callbacks by default).
+- Redirect URIs are restricted to `oauth.allowed_redirect_uris` (claude.ai, claude.com and ChatGPT callbacks by default; ChatGPT's stable callback relies on the RFC 9207 `iss` parameter the proxy returns).
 - `POST /oauth/register`, `/oauth/authorize` and `/oauth/token` are rate limited per client IP by the app itself (generous defaults, `oauth.rate_limit`; excess requests get 429 with `Retry-After`): the replay caches are bounded and abuse could fill them. The authorization-code cache then fails closed with 503; the refresh-family cache never does, it evicts the least recently used families (revoked ones last), so legitimate users are not locked out, at the cost that reuse detection is lost for evicted chains: with the defaults, about 56 sustained sources (or one IPv6 /48) can evict every ordinary chain (touched hourly), and about 100 sources flush the revoked-family quota (10% of the cache) in minutes. Evicted clients just refresh as a new family; nothing locks out. The client IP honours `X-Forwarded-For` only from `trusted_proxies` (loopback by default); add your CDN or load balancer there. A reverse-proxy `limit_req` (the nginx snippet has one) is an optional extra layer. Details and the remaining attacker cost are in [docs/architecture.md](docs/architecture.md). See [docs/configuration.md](docs/configuration.md#rate-limiting).
 - Tokens, credentials and query strings are never logged.
 - The service runs as a dynamic unprivileged user under a restrictive systemd sandbox.

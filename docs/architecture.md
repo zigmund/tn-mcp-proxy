@@ -6,7 +6,7 @@ _To be written._
 
 ## OAuth flow
 
-Discovery sequence (claude.ai custom connector):
+Discovery sequence (claude.ai and ChatGPT custom connectors):
 
 1. The client calls the MCP endpoint without a token and gets `401` with
    `WWW-Authenticate: Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource<upstream.path>"`.
@@ -60,8 +60,21 @@ After that, errors are redirected to the `redirect_uri` with `error`,
 `invalid_request` (PKCE missing or not `S256`, malformed `code_challenge`,
 `state` over 1 KiB, repeated parameters; an invalid `state` is not echoed back), `invalid_target` (RFC 8707: unknown
 `resource`). `resource` must equal an upstream's public MCP URL
-(`public_url` + `path`); it may be omitted only when exactly one upstream is
+(`public_url` + `path`) byte for byte (no trailing-slash or origin-only
+normalization); it may be omitted only when exactly one upstream is
 configured.
+
+**ChatGPT and RFC 9207.** ChatGPT uses the stable redirect URI
+`https://chatgpt.com/connector_platform_oauth_redirect` only with servers that
+implement issuer identification (RFC 9207); otherwise it may fall back to a
+per-connector callback that cannot be allowlisted exactly. The proxy meets the
+requirements: the AS metadata (both documents) has
+`authorization_response_iss_parameter_supported: true`; its `issuer` is
+`public_url` and is byte-identical to the `authorization_servers` entry of the
+protected resource metadata; and `iss` (= `public_url`) is added to every
+redirect from the authorize endpoint, success and error alike, GET and POST.
+Client ID Metadata Documents are not supported and not advertised, so ChatGPT
+registers through DCR.
 
 **Form.** Fields come from the upstream's `credentials` (secrets are password
 inputs). The page names the upstream (`title`), the application name labelled
@@ -118,8 +131,9 @@ credentials are involved.
 
 - **Redirect allowlist.** `redirect_uris` is required (1 to 10 entries); each
   must exactly equal an entry of `oauth.allowed_redirect_uris` (default: the
-  claude.ai and claude.com callbacks). No patterns, no normalization. The
-  authorize endpoint checks the redirect URI against both the client's
+  claude.ai and claude.com callbacks and ChatGPT's stable
+  `https://chatgpt.com/connector_platform_oauth_redirect`). No patterns, no
+  normalization. The authorize endpoint checks the redirect URI against both the client's
   registered list and the current config, so removing a URI from the config
   revokes it for clients that registered earlier.
 - **Auth methods.** `token_endpoint_auth_method` is `none`,

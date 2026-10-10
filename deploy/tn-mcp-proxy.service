@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/tn-mcp-proxy -config /etc/tn-mcp-proxy/config.yaml
-# SIGHUP is handled by the binary and does not stop it (reserved for TLS cert reload).
+# SIGHUP is handled by the binary and does not stop it (reloads the TLS certificate when tls.* is set).
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
@@ -26,6 +26,21 @@ DynamicUser=yes
 # below is the file name inside the credentials directory).
 # Create the source file with: install -m 0600 -o root -g root /dev/null /etc/tn-mcp-proxy/keys
 LoadCredential=keys:/etc/tn-mcp-proxy/keys
+
+# Built-in TLS (tls.cert_file/tls.key_file), pick one:
+# a) Hot reload from Let's Encrypt: grant read access to the cert files via a
+#    group that can read /etc/letsencrypt/{live,archive}, e.g.
+#      SupplementaryGroups=tls-certs
+#    /etc/letsencrypt/{live,archive} are 0700 root and privkey*.pem 0600 by
+#    default: groupadd tls-certs; chgrp -R tls-certs the two dirs; chmod 750
+#    them; chmod 640 archive/*/privkey*.pem (see docs/configuration.md; re-apply
+#    from a certbot deploy hook, then `systemctl reload tn-mcp-proxy`).
+# b) Private copy (no hot reload; needs a restart after renewal):
+#      LoadCredential=fullchain.pem:/etc/letsencrypt/live/mcp.example.com/fullchain.pem
+#      LoadCredential=privkey.pem:/etc/letsencrypt/live/mcp.example.com/privkey.pem
+#    with tls.cert_file/key_file under /run/credentials/tn-mcp-proxy.service/.
+# Binding a port below 1024 additionally needs AmbientCapabilities=CAP_NET_BIND_SERVICE
+# (and CapabilityBoundingSet=CAP_NET_BIND_SERVICE); prefer a high port.
 
 # --- Hardening ---
 NoNewPrivileges=yes

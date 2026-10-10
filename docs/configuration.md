@@ -25,8 +25,8 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
-| `tls.cert_file`, `tls.key_file` | empty | Set both or neither |
-| `tls.reload_interval` | `1m` | Used when TLS is enabled |
+| `tls.cert_file`, `tls.key_file` | empty | PEM certificate (with chain) and private key. Set both or neither; both set enables built-in HTTPS. See [Built-in TLS](#built-in-tls) |
+| `tls.reload_interval` | `1m` | How often the files are checked for changes. Positive duration; `0` or unset means the default. SIGHUP reloads immediately regardless |
 
 For all durations, `0` or unset means the default; negative values are rejected.
 The same holds for `per_minute` and `burst` of every rate limit (a zero value is
@@ -170,10 +170,71 @@ oauth:
 trusted_proxies: ["127.0.0.0/8", "::1/128"]
 ```
 
+## Built-in TLS
+
+Setting both `tls.cert_file` and `tls.key_file` makes the service serve HTTPS on
+`listen` (minimum TLS 1.2, Go's default cipher suites, HTTP/2 and HTTP/1.1 via
+ALPN). Plain HTTP is not served on that port. `public_url` is independent of
+this setting: keep it `https` whether TLS ends here or in a proxy in front.
+
+```yaml
+tls:
+  cert_file: /etc/letsencrypt/live/mcp.example.com/fullchain.pem
+  key_file:  /etc/letsencrypt/live/mcp.example.com/privkey.pem
+  reload_interval: 1m
+```
+
+- The pair is loaded at startup; a missing, unreadable or mismatched pair is a
+  fatal startup error (the service never falls back to plain HTTP).
+- Hot reload: every `reload_interval` both files are read and a SHA-256 of
+  their contents is compared with the last successful load (content-based, so
+  same-second or same-size replacements are not missed; symlinks such as the
+  Let's Encrypt `live/` links are followed). On a change the pair is validated
+  and swapped atomically; new connections get the new certificate, established
+  ones are unaffected. `SIGHUP` (`systemctl reload tn-mcp-proxy`) forces a
+  reload immediately, even if nothing changed.
+- A failed reload (unreadable, half-written or mismatched pair) logs a `warn`,
+  keeps serving the previous certificate and is retried at the next tick.
+- Every (re)load logs the subject, DNS names and `not_after` at `info`. A
+  certificate with less than 14 days of validity logs a `warn` on load and then
+  at most once a day while it stays loaded, so a broken renewal does not go
+  unnoticed.
+
+Under systemd with `DynamicUser=yes` the process cannot read `/etc/letsencrypt`
+by default. Either:
+
+- add `SupplementaryGroups=tls-certs` with a group that has read access to
+  `/etc/letsencrypt/live` and `/etc/letsencrypt/archive` (the unit keeps
+  `ProtectSystem=strict`, which leaves `/etc` readable); hot reload works. By
+  default both directories are `0700 root` and `privkey*.pem` is `0600`, so
+  open them up once:
+
+  ```sh
+  groupadd tls-certs
+  chgrp -R tls-certs /etc/letsencrypt/live /etc/letsencrypt/archive
+  chmod 750 /etc/letsencrypt/live /etc/letsencrypt/archive
+  chmod 640 /etc/letsencrypt/archive/mcp.example.com/privkey*.pem
+  ```
+
+  Certbot generally carries the group (and mode bits) of the previous private
+  key over to the renewed one, but this is not guaranteed across versions and
+  setups; the safe option is a deploy hook
+  (`/etc/letsencrypt/renewal-hooks/deploy/`) that re-applies the `chgrp`/`chmod`
+  above and runs `systemctl reload tn-mcp-proxy`; or
+- use `LoadCredential=` and point `tls.*` at
+  `/run/credentials/tn-mcp-proxy.service/<name>`. systemd copies the files when
+  the service starts, so a renewal is only seen after `systemctl restart`
+  (a certbot deploy hook can run it). Note that `$CREDENTIALS_DIRECTORY` is not
+  expanded in the config.
+
+With the first option a certbot deploy hook is optional (polling finds the new
+files); with either it may run `systemctl reload tn-mcp-proxy` to apply a
+renewal without waiting for the interval.
+
 ## Reverse proxy
 
-The service speaks plain HTTP (built-in TLS is not implemented yet; setting
-`tls.*` is a startup error), so put a TLS-terminating reverse proxy in front.
+By default the service speaks plain HTTP, so put a TLS-terminating reverse proxy
+in front (or enable [built-in TLS](#built-in-tls) and expose it directly).
 Certificates, HTTP->HTTPS redirects and HSTS are your own setup; the nginx
 snippet below shows only what this service needs. The proxy must forward every
 path (`/.well-known/*`, `/oauth/*` and the upstream paths) to the service.

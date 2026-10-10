@@ -111,13 +111,14 @@ journalctl -u tn-mcp-proxy -f
 ```
 
 Options: `-config <path>` (default `/etc/tn-mcp-proxy/config.yaml`), `-version`, `-h`.
-`SIGTERM`/`SIGINT` shut down gracefully; `SIGHUP` is accepted but currently reloads
-nothing (the unit's `ExecReload` is harmless).
+`SIGTERM`/`SIGINT` shut down gracefully; `SIGHUP` reloads the TLS certificate
+when built-in TLS is enabled (the unit's `ExecReload` sends it) and is otherwise a no-op.
 
 ## Reverse proxy
 
-The service listens on plain HTTP (built-in TLS is not implemented yet; setting
-`tls.*` makes it exit at startup), so terminate TLS in front of it. A tested
+The service listens on plain HTTP by default, so terminate TLS in front of it.
+Alternatively set `tls.cert_file`/`tls.key_file` to serve HTTPS directly, with
+certificate hot reload (see [Built-in TLS](docs/configuration.md#built-in-tls)). A tested
 nginx snippet (no buffering, long timeouts, `X-Forwarded-For` overwrite, optional
 extra rate limit for `/oauth/`) is in [docs/configuration.md](docs/configuration.md#reverse-proxy).
 `GET /healthz` returns 200 and is meant for local checks.

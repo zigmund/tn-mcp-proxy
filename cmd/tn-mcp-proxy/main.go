@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,8 +12,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
+	"github.com/zigmund/tn-mcp-proxy/internal/certreload"
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/logging"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
@@ -23,8 +26,6 @@ import (
 var version = "dev"
 
 const defaultConfigPath = "/etc/tn-mcp-proxy/config.yaml"
-
-var errTLSNotImplemented = errors.New("tls: TLS termination not implemented yet; remove tls.cert_file/tls.key_file and terminate TLS in nginx")
 
 // errUsage marks an error that was already reported (bad command line).
 var errUsage = errors.New("invalid command line")
@@ -82,9 +83,6 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	if cfg.TLSEnabled() {
-		return errTLSNotImplemented // fail fast rather than silently serve plain HTTP
-	}
 
 	log := logging.New(cfg.Log, stderr)
 	sealer, err := seal.New(cfg.Secrets.Keys)
@@ -94,6 +92,20 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 	srv, err := server.New(cfg, sealer, log)
 	if err != nil {
 		return fmt.Errorf("building server: %w", err)
+	}
+
+	var certs *certreload.Reloader
+	if cfg.TLSEnabled() {
+		// Fail fast: never fall back to plain HTTP when TLS was requested.
+		certs, err = certreload.New(cfg.TLS.CertFile, cfg.TLS.KeyFile, log)
+		if err != nil {
+			return fmt.Errorf("loading tls certificate: %w", err)
+		}
+		srv.EnableTLS(&tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: certs.GetCertificate,
+		})
+		srv.OnReload("tls certificate", certs.Reload)
 	}
 
 	ln, err := net.Listen("tcp", cfg.Listen)
@@ -110,6 +122,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 		"listen", ln.Addr().String(),
 		"public_url", cfg.PublicURL,
 		"upstreams", ups,
+		"tls", certs != nil,
 	)
 	if h.ready != nil {
 		h.ready(ln.Addr())
@@ -118,6 +131,14 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go srv.WatchReload(wctx, h.reload)
+	var watchers sync.WaitGroup
+	if certs != nil {
+		watchers.Add(1)
+		go func() {
+			defer watchers.Done()
+			certs.Watch(wctx, cfg.TLS.ReloadInterval)
+		}()
+	}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -134,6 +155,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 	err = srv.Serve(ctx, ln)
 	cancel()
 	<-stopped
+	watchers.Wait()
 	if err != nil {
 		return err
 	}

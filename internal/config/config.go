@@ -501,7 +501,8 @@ func hasDotSegment(p string) bool {
 }
 
 // normalizePublicURL validates raw and returns the canonical form: lowercase
-// scheme and host, default port dropped, no trailing slash.
+// scheme and host, default port dropped, no trailing slash. A path is
+// rejected: RFC 8414/9728 well-known URIs live at the host root.
 func normalizePublicURL(raw string) (string, error) {
 	if err := checkHTTPURL(raw, false); err != nil {
 		return "", err
@@ -517,7 +518,10 @@ func normalizePublicURL(raw string) (string, error) {
 	if port != "" && !defaultPort {
 		host += ":" + port
 	}
-	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/"), nil
+	if strings.TrimRight(u.EscapedPath(), "/") != "" {
+		return "", errors.New("must be an origin without a path (well-known metadata is served at the host root)")
+	}
+	return scheme + "://" + host, nil
 }
 
 // checkHTTPURL requires an absolute http(s) URL without userinfo or fragment

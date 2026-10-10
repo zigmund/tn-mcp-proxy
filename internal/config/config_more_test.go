@@ -13,17 +13,16 @@ import (
 
 func TestPublicURLNormalization(t *testing.T) {
 	tests := map[string]string{
-		"https://MCP.Example.COM":          "https://mcp.example.com",
-		"HTTPS://mcp.example.com/":         "https://mcp.example.com",
-		"https://mcp.example.com:443":      "https://mcp.example.com",
-		"http://mcp.example.com:80/":       "http://mcp.example.com",
-		"https://mcp.example.com:8443":     "https://mcp.example.com:8443",
-		"http://mcp.example.com:443":       "http://mcp.example.com:443",
-		"https://mcp.example.com:80":       "https://mcp.example.com:80",
-		"https://mcp.example.com/p/q///":   "https://mcp.example.com/p/q",
-		"https://Mcp.Example.com:443/Base": "https://mcp.example.com/Base",
-		"https://[::1]:443/":               "https://[::1]",
-		"http://[::1]:8080":                "http://[::1]:8080",
+		"https://MCP.Example.COM":      "https://mcp.example.com",
+		"HTTPS://mcp.example.com/":     "https://mcp.example.com",
+		"https://mcp.example.com:443":  "https://mcp.example.com",
+		"http://mcp.example.com:80/":   "http://mcp.example.com",
+		"https://mcp.example.com:8443": "https://mcp.example.com:8443",
+		"http://mcp.example.com:443":   "http://mcp.example.com:443",
+		"https://mcp.example.com:80":   "https://mcp.example.com:80",
+		"https://mcp.example.com///":   "https://mcp.example.com",
+		"https://[::1]:443/":           "https://[::1]",
+		"http://[::1]:8080":            "http://[::1]:8080",
 	}
 	for in, want := range tests {
 		y := strings.Replace(base(), "https://mcp.example.com/", in, 1)

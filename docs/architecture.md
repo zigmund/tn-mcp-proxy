@@ -197,7 +197,7 @@ makes one authenticated MCP exchange before issuing a code: `initialize`,
 `notifications/initialized`, then `tools/call` of the configured read-only
 tool, all with the entered credential headers, and a best-effort `DELETE` when
 the upstream issued a session (each POST carries `Accept: application/json,
-text/event-stream` and `User-Agent: tn-mcp-proxy/<version>`, the module version from the Go build info, or `dev`; it can differ from `-version`). Classification: HTTP `401`/`403` at any step or
+text/event-stream` and `User-Agent: tn-mcp-proxy/<version>`, the binary's version, the same one `-version` prints, which the initialize `clientInfo.version` also carries). Classification: HTTP `401`/`403` at any step or
 a tool result with `isError: true` means rejected (form re-rendered, `400`);
 everything else that is not a clean result (JSON-RPC error, non-2xx, `3xx`,
 transport error, timeout, malformed or over-1-MiB body, no response with the

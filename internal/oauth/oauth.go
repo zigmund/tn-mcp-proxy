@@ -41,6 +41,8 @@ type Server struct {
 	limits   map[string]*ratelimit.Limiter
 	// checker verifies credentials on authorize for upstreams with validate.
 	checker *credcheck.Checker
+	// version is the binary version the checker reports to upstreams.
+	version string
 	// verdicts, when set, is the proxy's shared re-check verdict cache: the
 	// refresh grant refuses credentials it has confirmed rejected.
 	verdicts RejectionSource
@@ -68,6 +70,12 @@ func WithRejectionSource(rs RejectionSource) Option {
 // Option configures a Server.
 type Option func(*Server)
 
+// WithVersion sets the binary version the credential checker reports to
+// upstreams (User-Agent and MCP clientInfo). An empty version means "dev".
+func WithVersion(v string) Option {
+	return func(s *Server) { s.version = v }
+}
+
 // WithClientIP sets the client IP resolver used for rate limiting. The default
 // trusts only loopback proxies; the server passes the shared httplog.Resolver
 // so that logs and limits agree.
@@ -89,11 +97,11 @@ func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger, opts ...Opti
 		cfg: cfg, sealer: sealer, log: log, now: time.Now,
 		codes: newReplayCache(maxReplayEntries), families: newFamilyCache(maxFamilyEntries),
 		clientIP: httplog.NewResolver(cfg.TrustedNets).ClientIP,
-		checker:  credcheck.New(),
 	}
 	for _, o := range opts {
 		o(s)
 	}
+	s.checker = credcheck.New(s.version)
 	s.limits = newLimiters(cfg.OAuth.RateLimit, cfg.OAuth.CodeTTL, func() time.Time { return s.now() })
 	return s
 }

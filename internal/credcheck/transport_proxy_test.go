@@ -8,7 +8,7 @@ import (
 // The check carries credential headers, so
 // it must ignore HTTP(S)_PROXY.
 func TestCheckerIgnoresEnvironmentProxy(t *testing.T) {
-	tr, ok := New().client.Transport.(*http.Transport)
+	tr, ok := New("").client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("checker transport is not an *http.Transport")
 	}

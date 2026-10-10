@@ -89,7 +89,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 	if err != nil {
 		return fmt.Errorf("initializing token sealer: %w", err)
 	}
-	srv, err := server.New(cfg, sealer, log)
+	srv, err := server.New(cfg, sealer, log, server.WithVersion(version))
 	if err != nil {
 		return fmt.Errorf("building server: %w", err)
 	}

@@ -67,7 +67,9 @@ input), `optional`. Each credential becomes one input on the authorize form; val
 credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
 `arguments` (optional JSON object passed to the tool, default `{}`; values are
 never echoed in error messages), `timeout` (default `10s`; `0` or unset means
-the default, negative values and values above `60s` are rejected).
+the default, negative values and values above `60s` are rejected),
+`recheck_on_tool_error` (bool, default `false`; also re-run the check when a
+proxied tool call fails, see [Re-check on tool errors](#re-check-on-tool-errors)).
 
 Forbidden credential headers: `Authorization`, `Proxy-Authorization`, `Cookie`,
 `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`,
@@ -145,6 +147,72 @@ with a tool error (`isError: true`) over HTTP `200`, which is why `isError` is
 treated as a rejection (Tradernet never answers `401` for bad keys). It
 verifies only the API key and secret: the optional `X-TN-SID` header is not
 checked by this tool, so a wrong SID is still accepted at connect time.
+
+## Re-check on tool errors
+
+An upstream that answers `401` for bad credentials needs no setup: the proxy
+rewrites the challenge so the client re-runs authorization. Tradernet does not:
+for a revoked or wrong key it answers `tools/call` with HTTP `200` and a tool
+error (`isError: true`), so the connector stays "connected" while every call
+fails. But a tool error alone proves nothing: a bad ticker or a closed market
+produces one too. `validate.recheck_on_tool_error` therefore uses a tool error
+only as a trigger and lets the [credential check](#credential-validation)
+decide:
+
+```yaml
+upstreams:
+  - name: tn
+    ...
+    validate:
+      tool: get_auth_info
+      recheck_on_tool_error: true   # default false
+```
+
+The field lives inside `validate`, so it needs a `validate` block (and its
+`tool`, `arguments` and `timeout`). The proxy does not read or match the tool
+error text.
+
+- **Off by default.** Without the flag nothing is inspected and compression is
+  untouched.
+- **Trigger.** A `POST` response with status `200`, media type
+  `application/json` and a body of at most 64 KiB in which any JSON-RPC
+  response (single object or batch) has `result.isError: true`. Larger bodies,
+  SSE, `GET`, malformed JSON and everything else are forwarded unchanged and
+  never cause a check.
+- **Decision.** The proxy runs the same MCP session as the authorize form
+  (`initialize`, `notifications/initialized`, `tools/call` of `validate.tool`,
+  `DELETE`) with the token's credentials, bounded by `validate.timeout` and the
+  client's request. If the upstream rejects the credentials, the client gets
+  `401` with `WWW-Authenticate: Bearer error="invalid_token",
+  error_description="upstream rejected credentials", resource_metadata="..."`
+  and the short `unauthorized` body (the upstream body is dropped), and one
+  `warn` line is logged (no error text, headers or credentials). If the check
+  accepts the credentials, fails, times out, is skipped or the client went
+  away, the original response is forwarded unchanged.
+- **Latency.** Only responses that carry a tool error wait for the check: one
+  MCP session, roughly 0.4 to 1 s with Tradernet, and up to `validate.timeout`
+  (default 10 s) if the upstream hangs. Successful responses are
+  unaffected beyond reading up to 64 KiB of the body before forwarding it (a
+  slow `application/json` response is held until it ends or passes the cap).
+- **Cost control.** All state is in memory and bounded. Verdicts are cached
+  for 60 s (accepted and rejected; "no verdict" for 5 s) under a keyed hash of
+  the upstream name and credentials, so no plaintext credentials are kept; the
+  cache holds at most 4096 entries and evicts the oldest. Concurrent checks for
+  the same credentials share one session. At most 8 checks run at once across
+  all upstreams; when saturated the check is skipped and the response passes
+  through. A burst of tool errors from one token costs at most one session per
+  minute.
+- **Compression.** For these `POST`s the outbound `Accept-Encoding` is narrowed
+  to `gzip` (when the client accepted it) or `identity`, because the proxy
+  cannot decode brotli or zstd. A gzip body is decoded only to inspect it; the
+  original bytes are forwarded when the response is not replaced. `GET`
+  requests keep their `Accept-Encoding`.
+- **Residual risk.** If the upstream reports a transient failure of the check
+  call itself as a tool error (`isError: true`) rather than as an HTTP or
+  JSON-RPC error, the check reads it as a rejection and the user is asked to
+  log in again once; connection errors, timeouts, 5xx and JSON-RPC errors never
+  have that effect. Verdicts can also be up to 60 s old: a key revoked just
+  after an accepted check is noticed up to a minute late.
 
 ## Keys
 

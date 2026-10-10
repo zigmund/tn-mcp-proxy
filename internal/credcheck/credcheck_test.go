@@ -1,4 +1,4 @@
-package oauth
+package credcheck
 
 import (
 	"context"
@@ -142,8 +142,8 @@ func (f *mcpFake) upstream(v config.Validate) config.Upstream {
 	return config.Upstream{Name: "tn", Title: "Tradernet", Path: "/tn", URL: f.srv.URL + "/mcp", Validate: &v}
 }
 
-func (f *mcpFake) check(v config.Validate) error {
-	return newCredChecker().check(context.Background(), f.upstream(v), testCreds)
+func (f *mcpFake) Check(v config.Validate) error {
+	return New().Check(context.Background(), f.upstream(v), testCreds)
 }
 
 // wantCheck asserts the outcome kind and that the reason contains reason.
@@ -155,12 +155,12 @@ func wantCheck(t *testing.T, err error, kind error, reason string) {
 		}
 		return
 	}
-	var ce *checkError
+	var ce *CheckError
 	if !errors.Is(err, kind) || !errors.As(err, &ce) {
 		t.Fatalf("check = %v, want kind %v", err, kind)
 	}
-	if !strings.Contains(ce.reason, reason) {
-		t.Fatalf("reason = %q, want it to contain %q", ce.reason, reason)
+	if !strings.Contains(ce.Reason, reason) {
+		t.Fatalf("reason = %q, want it to contain %q", ce.Reason, reason)
 	}
 	if strings.Contains(err.Error(), "upstream-secret-text") || strings.Contains(err.Error(), "k-secret") {
 		t.Fatalf("error leaks secret text: %v", err)
@@ -169,7 +169,7 @@ func wantCheck(t *testing.T, err error, kind error, reason string) {
 
 func TestCheckValidJSON(t *testing.T) {
 	f := newMCPFake(t)
-	wantCheck(t, f.check(config.Validate{Arguments: map[string]any{"limit": 3, "nested": map[string]any{"a": []any{"x"}}}}), nil, "")
+	wantCheck(t, f.Check(config.Validate{Arguments: map[string]any{"limit": 3, "nested": map[string]any{"a": []any{"x"}}}}), nil, "")
 
 	if got, want := f.methods(), []string{"POST initialize", "POST notifications/initialized", "POST tools/call"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("requests = %v, want %v", got, want)
@@ -208,7 +208,7 @@ func TestCheckValidJSON(t *testing.T) {
 
 func TestCheckDefaultArguments(t *testing.T) {
 	f := newMCPFake(t)
-	wantCheck(t, f.check(config.Validate{}), nil, "")
+	wantCheck(t, f.Check(config.Validate{}), nil, "")
 	args, ok := f.requests()[2].Msg["params"].(map[string]any)["arguments"].(map[string]any)
 	if !ok || len(args) != 0 {
 		t.Errorf("arguments = %v, want {}", f.requests()[2].Msg["params"])
@@ -219,7 +219,7 @@ func TestCheckNoValidateIsNoop(t *testing.T) {
 	f := newMCPFake(t)
 	up := f.upstream(config.Validate{})
 	up.Validate = nil
-	if err := newCredChecker().check(context.Background(), up, testCreds); err != nil {
+	if err := New().Check(context.Background(), up, testCreds); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(f.requests()); n != 0 {
@@ -248,13 +248,13 @@ func TestCheckValidSSE(t *testing.T) {
 		`data: {"jsonrpc":"2.0","id":2,"result":{"isError":true}}`,
 		"",
 	}, "\n")))
-	wantCheck(t, f.check(config.Validate{}), nil, "")
+	wantCheck(t, f.Check(config.Validate{}), nil, "")
 }
 
 func TestCheckSSEWithCRLFAndNoFinalBlankLine(t *testing.T) {
 	f := newMCPFake(t)
 	f.on("tools/call", sse("data: "+rpcResult(2, `{"content":[]}`)+"\r\n"))
-	wantCheck(t, f.check(config.Validate{}), nil, "")
+	wantCheck(t, f.Check(config.Validate{}), nil, "")
 }
 
 func TestCheckOutcomes(t *testing.T) {
@@ -266,57 +266,57 @@ func TestCheckOutcomes(t *testing.T) {
 		kind   error
 		reason string
 	}{
-		{"isError true", "tools/call", replyJSON(200, `{"content":[{"type":"text","text":"upstream-secret-text"}],"isError":true}`), errCredsRejected, "tool reported an error"},
-		{"401 at initialize", "initialize", status(401), errCredsRejected, "http 401"},
-		{"403 at initialize", "initialize", status(403), errCredsRejected, "http 403"},
-		{"401 at initialized", "notifications/initialized", status(401), errCredsRejected, "http 401"},
-		{"401 at tools/call", "tools/call", status(401), errCredsRejected, "http 401"},
-		{"403 at tools/call", "tools/call", status(403), errCredsRejected, "http 403"},
-		{"jsonrpc error", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) { mcpJSON(w, 200, rpcErr(id, -32602)) }, errCredsUnavailable, "jsonrpc error code -32602"},
-		{"jsonrpc error at initialize", "initialize", func(w http.ResponseWriter, _ *http.Request, id any) { mcpJSON(w, 200, rpcErr(id, -32600)) }, errCredsUnavailable, "jsonrpc error code -32600"},
-		{"500 at tools/call", "tools/call", status(500), errCredsUnavailable, "http 500"},
-		{"500 at initialize", "initialize", status(500), errCredsUnavailable, "http 500"},
-		{"429 at tools/call", "tools/call", status(429), errCredsUnavailable, "http 429"},
-		{"initialized 500", "notifications/initialized", status(500), errCredsUnavailable, "http 500"},
-		{"404", "tools/call", status(404), errCredsUnavailable, "http 404"},
-		{"malformed json", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, `{"jsonrpc":`) }, errCredsUnavailable, "malformed"},
-		{"batch array", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) { mcpJSON(w, 200, "["+rpcResult(id, `{}`)+"]") }, errCredsUnavailable, "malformed"},
-		{"null result", "tools/call", replyJSON(200, `null`), errCredsUnavailable, "no matching response"},
+		{"isError true", "tools/call", replyJSON(200, `{"content":[{"type":"text","text":"upstream-secret-text"}],"isError":true}`), ErrRejected, "tool reported an error"},
+		{"401 at initialize", "initialize", status(401), ErrRejected, "http 401"},
+		{"403 at initialize", "initialize", status(403), ErrRejected, "http 403"},
+		{"401 at initialized", "notifications/initialized", status(401), ErrRejected, "http 401"},
+		{"401 at tools/call", "tools/call", status(401), ErrRejected, "http 401"},
+		{"403 at tools/call", "tools/call", status(403), ErrRejected, "http 403"},
+		{"jsonrpc error", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) { mcpJSON(w, 200, rpcErr(id, -32602)) }, ErrUnavailable, "jsonrpc error code -32602"},
+		{"jsonrpc error at initialize", "initialize", func(w http.ResponseWriter, _ *http.Request, id any) { mcpJSON(w, 200, rpcErr(id, -32600)) }, ErrUnavailable, "jsonrpc error code -32600"},
+		{"500 at tools/call", "tools/call", status(500), ErrUnavailable, "http 500"},
+		{"500 at initialize", "initialize", status(500), ErrUnavailable, "http 500"},
+		{"429 at tools/call", "tools/call", status(429), ErrUnavailable, "http 429"},
+		{"initialized 500", "notifications/initialized", status(500), ErrUnavailable, "http 500"},
+		{"404", "tools/call", status(404), ErrUnavailable, "http 404"},
+		{"malformed json", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, `{"jsonrpc":`) }, ErrUnavailable, "malformed"},
+		{"batch array", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) { mcpJSON(w, 200, "["+rpcResult(id, `{}`)+"]") }, ErrUnavailable, "malformed"},
+		{"null result", "tools/call", replyJSON(200, `null`), ErrUnavailable, "no matching response"},
 		{"null error and null result", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) {
 			mcpJSON(w, 200, fmt.Sprintf(`{"jsonrpc":"2.0","id":%v,"result":null,"error":null}`, id))
-		}, errCredsUnavailable, "no matching response"},
+		}, ErrUnavailable, "no matching response"},
 		{"result with null error is accepted as result", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) {
 			mcpJSON(w, 200, fmt.Sprintf(`{"jsonrpc":"2.0","id":%v,"result":{"isError":true},"error":null}`, id))
-		}, errCredsRejected, "tool reported an error"},
+		}, ErrRejected, "tool reported an error"},
 		{"null result with error", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) {
 			mcpJSON(w, 200, fmt.Sprintf(`{"jsonrpc":"2.0","id":%v,"result":null,"error":{"code":-32000}}`, id))
-		}, errCredsUnavailable, "jsonrpc error code -32000"},
-		{"scalar result", "tools/call", replyJSON(200, `true`), errCredsUnavailable, "malformed"},
-		{"init null result", "initialize", replyJSON(200, `null`), errCredsUnavailable, "no matching response"},
-		{"id mismatch", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, rpcResult(99, `{}`)) }, errCredsUnavailable, "no matching response"},
-		{"string id", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, rpcResult(`"2"`, `{}`)) }, errCredsUnavailable, "no matching response"},
-		{"no id", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, `{"jsonrpc":"2.0","result":{}}`) }, errCredsUnavailable, "no matching response"},
+		}, ErrUnavailable, "jsonrpc error code -32000"},
+		{"scalar result", "tools/call", replyJSON(200, `true`), ErrUnavailable, "malformed"},
+		{"init null result", "initialize", replyJSON(200, `null`), ErrUnavailable, "no matching response"},
+		{"id mismatch", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, rpcResult(99, `{}`)) }, ErrUnavailable, "no matching response"},
+		{"string id", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, rpcResult(`"2"`, `{}`)) }, ErrUnavailable, "no matching response"},
+		{"no id", "tools/call", func(w http.ResponseWriter, _ *http.Request, _ any) { mcpJSON(w, 200, `{"jsonrpc":"2.0","result":{}}`) }, ErrUnavailable, "no matching response"},
 		{"wrong content type", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = io.WriteString(w, rpcResult(id, `{}`))
-		}, errCredsUnavailable, "content type"},
+		}, ErrUnavailable, "content type"},
 		{"missing content type", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) {
 			w.Header()["Content-Type"] = nil
 			_, _ = io.WriteString(w, rpcResult(id, `{}`))
-		}, errCredsUnavailable, "content type"},
-		{"sse without response", "tools/call", sse(`data: {"jsonrpc":"2.0","method":"notifications/message"}` + "\n\n"), errCredsUnavailable, "no matching response"},
-		{"sse id mismatch only", "tools/call", sse("data: " + rpcResult(7, `{}`) + "\n\n"), errCredsUnavailable, "no matching response"},
+		}, ErrUnavailable, "content type"},
+		{"sse without response", "tools/call", sse(`data: {"jsonrpc":"2.0","method":"notifications/message"}` + "\n\n"), ErrUnavailable, "no matching response"},
+		{"sse id mismatch only", "tools/call", sse("data: " + rpcResult(7, `{}`) + "\n\n"), ErrUnavailable, "no matching response"},
 		{"oversized json", "tools/call", func(w http.ResponseWriter, _ *http.Request, id any) {
 			mcpJSON(w, 200, rpcResult(id, `{"pad":"`+huge+`"}`))
-		}, errCredsUnavailable, "too large"},
-		{"oversized sse", "tools/call", sse(strings.Repeat(": "+strings.Repeat("a", 1000)+"\n", maxCheckBody/1000+10) + "data: " + rpcResult(2, `{}`) + "\n\n"), errCredsUnavailable, "too large"},
-		{"oversized sse line", "tools/call", sse("data: " + huge + "\n\n"), errCredsUnavailable, "too large"},
+		}, ErrUnavailable, "too large"},
+		{"oversized sse", "tools/call", sse(strings.Repeat(": "+strings.Repeat("a", 1000)+"\n", maxCheckBody/1000+10) + "data: " + rpcResult(2, `{}`) + "\n\n"), ErrUnavailable, "too large"},
+		{"oversized sse line", "tools/call", sse("data: " + huge + "\n\n"), ErrUnavailable, "too large"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newMCPFake(t)
 			f.on(tt.method, tt.fn)
-			wantCheck(t, f.check(config.Validate{}), tt.kind, tt.reason)
+			wantCheck(t, f.Check(config.Validate{}), tt.kind, tt.reason)
 		})
 	}
 }
@@ -325,7 +325,7 @@ func TestCheckOutcomes(t *testing.T) {
 func TestCheckStopsAtFirstFailure(t *testing.T) {
 	f := newMCPFake(t)
 	f.on("initialize", status(401))
-	wantCheck(t, f.check(config.Validate{}), errCredsRejected, "http 401")
+	wantCheck(t, f.Check(config.Validate{}), ErrRejected, "http 401")
 	if got := f.methods(); !reflect.DeepEqual(got, []string{"POST initialize"}) {
 		t.Errorf("requests = %v", got)
 	}
@@ -348,7 +348,7 @@ func TestCheckRedirectNotFollowed(t *testing.T) {
 			f.on("initialize", func(w http.ResponseWriter, r *http.Request, _ any) {
 				http.Redirect(w, r, other.URL+"/steal", code)
 			})
-			wantCheck(t, f.check(config.Validate{}), errCredsUnavailable, fmt.Sprintf("http %d", code))
+			wantCheck(t, f.Check(config.Validate{}), ErrUnavailable, fmt.Sprintf("http %d", code))
 		})
 	}
 	mu.Lock()
@@ -367,8 +367,8 @@ func TestCheckTimeout(t *testing.T) {
 		}
 	})
 	start := time.Now()
-	err := f.check(config.Validate{Timeout: 300 * time.Millisecond})
-	wantCheck(t, err, errCredsUnavailable, "timeout")
+	err := f.Check(config.Validate{Timeout: 300 * time.Millisecond})
+	wantCheck(t, err, ErrUnavailable, "timeout")
 	if d := time.Since(start); d > 3*time.Second {
 		t.Errorf("check took %v, want about the 300ms timeout", d)
 	}
@@ -378,8 +378,8 @@ func TestCheckParentContextCanceled(t *testing.T) {
 	f := newMCPFake(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := newCredChecker().check(ctx, f.upstream(config.Validate{}), testCreds)
-	if !errors.Is(err, errCredsUnavailable) {
+	err := New().Check(ctx, f.upstream(config.Validate{}), testCreds)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("check = %v, want unavailable", err)
 	}
 }
@@ -388,15 +388,15 @@ func TestCheckUnreachableUpstream(t *testing.T) {
 	f := newMCPFake(t)
 	up := f.upstream(config.Validate{})
 	f.srv.Close()
-	err := newCredChecker().check(context.Background(), up, testCreds)
-	wantCheck(t, err, errCredsUnavailable, "transport error")
+	err := New().Check(context.Background(), up, testCreds)
+	wantCheck(t, err, ErrUnavailable, "transport error")
 	if strings.Contains(err.Error(), f.srv.URL) {
 		t.Errorf("error contains the upstream URL: %v", err)
 	}
-	var ce *checkError
+	var ce *CheckError
 	errors.As(err, &ce)
-	if ce.cause == nil || strings.Contains(ce.cause.Error(), "/mcp") {
-		t.Errorf("cause = %v, want the transport error without the URL", ce.cause)
+	if ce.Cause == nil || strings.Contains(ce.Cause.Error(), "/mcp") {
+		t.Errorf("cause = %v, want the transport error without the URL", ce.Cause)
 	}
 }
 
@@ -404,7 +404,7 @@ func TestCheckSessionPropagation(t *testing.T) {
 	f := newMCPFake(t)
 	f.session = "sess-123"
 	f.version = "2025-03-26"
-	wantCheck(t, f.check(config.Validate{}), nil, "")
+	wantCheck(t, f.Check(config.Validate{}), nil, "")
 
 	want := []string{"POST initialize", "POST notifications/initialized", "POST tools/call", "DELETE"}
 	if got := f.methods(); !reflect.DeepEqual(got, want) {
@@ -429,7 +429,7 @@ func TestCheckSessionPropagation(t *testing.T) {
 
 func TestCheckStatelessSendsProtocolVersion(t *testing.T) {
 	f := newMCPFake(t)
-	wantCheck(t, f.check(config.Validate{}), nil, "")
+	wantCheck(t, f.Check(config.Validate{}), nil, "")
 	for _, r := range f.requests()[1:] {
 		if r.Header.Get("Mcp-Session-Id") != "" || r.Header.Get("Mcp-Protocol-Version") != mcpProtocolVersion {
 			t.Errorf("%s: session %q version %q", r.RPC, r.Header.Get("Mcp-Session-Id"), r.Header.Get("Mcp-Protocol-Version"))
@@ -444,7 +444,7 @@ func TestCheckDeleteAfterFailure(t *testing.T) {
 	f.session = "sess-1"
 	f.on("tools/call", replyJSON(200, `{"isError":true}`))
 	f.on("DELETE", status(500))
-	wantCheck(t, f.check(config.Validate{}), errCredsRejected, "tool reported an error")
+	wantCheck(t, f.Check(config.Validate{}), ErrRejected, "tool reported an error")
 	if got := f.methods(); got[len(got)-1] != "DELETE" {
 		t.Errorf("requests = %v, want a trailing DELETE", got)
 	}
@@ -452,7 +452,7 @@ func TestCheckDeleteAfterFailure(t *testing.T) {
 	f2 := newMCPFake(t)
 	f2.session = "sess-2"
 	f2.on("DELETE", status(405))
-	wantCheck(t, f2.check(config.Validate{}), nil, "")
+	wantCheck(t, f2.Check(config.Validate{}), nil, "")
 }
 
 func TestCheckUpstreamURLUsedAsConfigured(t *testing.T) {
@@ -463,7 +463,7 @@ func TestCheckUpstreamURLUsedAsConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 	up := config.Upstream{Name: "tn", URL: srv.URL + "/mcp/tn?k=v", Validate: &config.Validate{Tool: "t"}}
-	_ = newCredChecker().check(context.Background(), up, testCreds)
+	_ = New().Check(context.Background(), up, testCreds)
 	if gotURI != "/mcp/tn?k=v" {
 		t.Errorf("request URI = %q", gotURI)
 	}
@@ -480,16 +480,16 @@ func TestCheckConcurrencyCap(t *testing.T) {
 		}
 		mcpJSON(w, 200, rpcResult(id, `{}`))
 	})
-	c := newCredChecker()
+	c := New()
 	c.sem = make(chan struct{}, 1)
 
 	first := make(chan error, 1)
-	go func() { first <- c.check(context.Background(), f.upstream(config.Validate{}), testCreds) }()
+	go func() { first <- c.Check(context.Background(), f.upstream(config.Validate{}), testCreds) }()
 	<-entered
 
 	before := len(f.requests())
-	err := c.check(context.Background(), f.upstream(config.Validate{Timeout: 100 * time.Millisecond}), testCreds)
-	wantCheck(t, err, errCredsUnavailable, "too many concurrent checks")
+	err := c.Check(context.Background(), f.upstream(config.Validate{Timeout: 100 * time.Millisecond}), testCreds)
+	wantCheck(t, err, ErrUnavailable, "too many concurrent checks")
 	if n := len(f.requests()); n != before {
 		t.Errorf("a refused check reached the upstream (%d -> %d requests)", before, n)
 	}
@@ -499,7 +499,7 @@ func TestCheckConcurrencyCap(t *testing.T) {
 		t.Fatalf("first check = %v", err)
 	}
 	// The slot was released: a new check goes through.
-	wantCheck(t, c.check(context.Background(), f.upstream(config.Validate{}), testCreds), nil, "")
+	wantCheck(t, c.Check(context.Background(), f.upstream(config.Validate{}), testCreds), nil, "")
 	if len(c.sem) != 0 {
 		t.Errorf("%d slot(s) leaked", len(c.sem))
 	}
@@ -521,7 +521,7 @@ func TestCheckConcurrentChecksNeverExceedCap(t *testing.T) {
 		mu.Unlock()
 		mcpJSON(w, 200, rpcResult(id, `{}`))
 	})
-	c := newCredChecker()
+	c := New()
 	c.sem = make(chan struct{}, cap)
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
@@ -529,7 +529,7 @@ func TestCheckConcurrentChecksNeverExceedCap(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- c.check(context.Background(), f.upstream(config.Validate{Timeout: 20 * time.Second}), testCreds)
+			errs <- c.Check(context.Background(), f.upstream(config.Validate{Timeout: 20 * time.Second}), testCreds)
 		}()
 	}
 	wg.Wait()

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
+	"github.com/zigmund/tn-mcp-proxy/internal/credcheck"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
 	"github.com/zigmund/tn-mcp-proxy/internal/tokens"
 )
@@ -304,7 +305,7 @@ func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds ma
 	if up.Validate == nil {
 		return "", 0
 	}
-	err := s.checker.check(ctx, up, creds)
+	err := s.checker.Check(ctx, up, creds)
 	if err == nil {
 		return "", 0
 	}
@@ -313,7 +314,7 @@ func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds ma
 	if title == "" {
 		title = up.Name
 	}
-	if errors.Is(err, errCredsRejected) {
+	if errors.Is(err, credcheck.ErrRejected) {
 		return title + " rejected these credentials. Check them and try again.", http.StatusBadRequest
 	}
 	return "Could not verify the credentials with " + title + " right now. Try again later.", http.StatusServiceUnavailable

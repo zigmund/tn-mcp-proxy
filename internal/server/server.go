@@ -97,8 +97,11 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Ha
 	// One resolver for the access log and the rate limiter, so they agree.
 	res := httplog.NewResolver(cfg.TrustedNets)
 	oauth.New(cfg, sealer, log, oauth.WithClientIP(res.ClientIP)).Register(inner)
+	// One re-checker for all upstreams: a shared verdict cache and one global
+	// cap on concurrent credential re-checks.
+	rechecker := proxy.NewRechecker(log)
 	for _, up := range cfg.Upstreams {
-		ph, err := proxy.New(up, cfg.PublicURL, sealer, log)
+		ph, err := proxy.New(up, cfg.PublicURL, sealer, log, proxy.WithRechecker(rechecker))
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: %w", up.Name, err)
 		}

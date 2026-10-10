@@ -169,8 +169,23 @@ proxy yourself or use one whose operator you trust.
 
 Your credentials are not stored on the server. They are sealed (encrypted and
 authenticated) inside the tokens that claude.ai holds, and are decrypted only
-to attach them to the request being forwarded. If the upstream later rejects
-them (revoked key), claude.ai re-runs the flow and you can enter new ones.
+to attach them to the request being forwarded.
+
+If the keys are later revoked, Tradernet does not answer `401`: it answers
+HTTP `200` with a tool error ("Invalid api key provided" and similar), so the
+connector would stay "connected" while every tool call fails. With
+`validate.recheck_on_tool_error: true` (the example config enables it for
+Tradernet) the proxy treats any tool error (`isError: true`) only as a trigger:
+it re-runs the upstream's `validate` credential check with the stored
+credentials, and only if that check rejects them does it answer `401
+invalid_token`, so claude.ai re-runs the flow and you can enter new keys. Other
+tool errors (bad ticker, closed market) are forwarded untouched. The proxy does
+not read the error text, so a wording change upstream does not break it. Only
+failed tool calls wait for the check (about a second; if the upstream hangs,
+up to `validate.timeout`, default 10 s); the verdict is cached
+for 60 seconds. See
+[docs/configuration.md](docs/configuration.md#re-check-on-tool-errors).
+An upstream that does answer `401` is handled without any configuration.
 
 ## Connect ChatGPT
 

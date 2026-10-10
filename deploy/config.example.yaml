@@ -76,6 +76,12 @@ upstreams:
       tool: get_auth_info
       # arguments: {}              # optional tool arguments (JSON object)
       # timeout: 10s               # whole check, default 10s, at most 60s
+      # Tradernet answers a revoked or wrong key with HTTP 200 and a tool error,
+      # not 401. With this on, a proxied tool error (isError: true) only
+      # triggers the same check as above (verdict cached for 60s); if the check
+      # says the credentials are rejected the client gets 401 invalid_token and
+      # re-authorizes, otherwise the original response is forwarded unchanged.
+      recheck_on_tool_error: true
 
 # Optional built-in TLS (both files or neither); leave commented out when a
 # reverse proxy terminates TLS. Relative paths are resolved against this file's

@@ -211,10 +211,16 @@ type Upstream struct {
 // Validate configures the credential check: one MCP tools/call made with the
 // entered credentials. Tool must be read-only. Timeout bounds the whole check
 // (the MCP handshake included); 0 or unset means DefaultValidateTimeout.
+//
+// RecheckOnToolError also runs the same check when a proxied response carries
+// a tool error (isError: true): if the upstream then rejects the stored
+// credentials, the client gets 401 invalid_token and re-authorizes. Needed for
+// upstreams that report bad keys as HTTP 200 tool errors instead of 401.
 type Validate struct {
-	Tool      string         `yaml:"tool"`
-	Arguments map[string]any `yaml:"arguments"`
-	Timeout   time.Duration  `yaml:"timeout"`
+	Tool               string         `yaml:"tool"`
+	Arguments          map[string]any `yaml:"arguments"`
+	Timeout            time.Duration  `yaml:"timeout"`
+	RecheckOnToolError bool           `yaml:"recheck_on_tool_error"`
 }
 
 // Credential is one header the user supplies for an upstream.

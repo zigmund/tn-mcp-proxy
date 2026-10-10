@@ -1,0 +1,49 @@
+# tn-mcp-proxy example configuration.
+
+# Address the HTTP server binds to (nginx terminates TLS in front of it).
+listen: 127.0.0.1:8787
+
+# Public base URL as seen by claude.ai. Absolute http(s), no query/fragment.
+public_url: https://mcp.example.com
+
+log:
+  level: info    # debug|info|warn|error (debug enables access log)
+  format: json   # json|text
+
+secrets:
+  # Token encryption keys: base64 (standard) of exactly 32 random bytes.
+  # Generate with: openssl rand -base64 32
+  # The first key encrypts; the rest only decrypt (key rotation).
+  # The key below is a DUMMY - REPLACE ME before deploying.
+  token_keys:
+    - "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="  # REPLACE ME
+  # Alternative (set exactly one of token_keys / token_keys_file): a file with
+  # one base64 key per line; '#' comments and blank lines are ignored.
+  # Relative paths are resolved against this config file's directory.
+  # token_keys_file: /etc/tn-mcp-proxy/keys
+
+# Durations: 0 or unset means the default; negative values are rejected.
+oauth:
+  access_token_ttl: 1h
+  refresh_token_ttl: 720h
+  code_ttl: 5m
+  allowed_redirect_uris:
+    - https://claude.ai/api/mcp/auth_callback
+    - https://claude.com/api/mcp/auth_callback
+
+upstreams:
+  - name: tn                       # [a-z0-9-]+, unique
+    title: Tradernet               # shown on the authorize form (default: name)
+    path: /tn/mcp                  # public path of literal segments [A-Za-z0-9._~-]; must not overlap /oauth, /.well-known, /healthz or other upstreams
+    url: https://tradernet.com/mcp/tn
+    credentials:                   # headers the user types into the form
+      - { header: X-TN-API-Key,    label: API key }
+      - { header: X-TN-API-Secret, label: API secret, secret: true }
+      - { header: X-TN-SID,        label: SID, optional: true }
+
+# Optional built-in TLS (both files or neither). Relative paths are resolved
+# against this file's directory. reload_interval 0 or unset = default (1m).
+tls:
+  cert_file: ""
+  key_file: ""
+  reload_interval: 1m

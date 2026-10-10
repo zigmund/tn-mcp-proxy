@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: tn-mcp-proxy
+
+builds:
+  - id: tn-mcp-proxy
+    main: ./cmd/tn-mcp-proxy
+    binary: tn-mcp-proxy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # Keep in sync with the Makefile LDFLAGS.
+    ldflags:
+      - -s -w -X main.version={{.Tag}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    wrap_in_directory: true
+    builds_info:
+      mtime: '{{ .CommitDate }}'
+    files:
+      - src: 'README*'
+        info:
+          mtime: '{{ .CommitDate }}'
+      - src: 'LICENSE*'
+        info:
+          mtime: '{{ .CommitDate }}'
+      - src: 'docs/*.md'
+        info:
+          mtime: '{{ .CommitDate }}'
+      - src: 'deploy/*'
+        info:
+          mtime: '{{ .CommitDate }}'
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github-native
+
+release:
+  prerelease: auto
+  draft: false

@@ -13,3 +13,6 @@ coverage.out
 
 # Local config
 /config.yaml
+
+# GoReleaser output
+dist/

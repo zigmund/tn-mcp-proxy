@@ -11,14 +11,17 @@ ExecStart=/usr/local/bin/tn-mcp-proxy -config /etc/tn-mcp-proxy/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
-# SIGTERM triggers a graceful shutdown; give long-lived SSE streams time to end.
+# SIGTERM starts a graceful shutdown: the binary waits up to 15 s for in-flight
+# requests, then closes the remaining connections (long-lived SSE streams never
+# end on their own). 30 s leaves headroom before systemd sends SIGKILL.
 TimeoutStopSec=30s
 
 # Run as a transient unprivileged user; no state is written to disk.
 DynamicUser=yes
 
-# Token encryption keys. The config must NOT contain `token_keys` (the config
-# file is plain, root-owned, world-readable). Instead keep the keys in a
+# Token encryption keys. The config should NOT contain `token_keys`: with
+# DynamicUser= the config file is typically root-owned and world-readable (see
+# the README). Instead keep the keys in a
 # root-only file and let systemd hand a private copy to the service:
 #   secrets.token_keys_file: /run/credentials/tn-mcp-proxy.service/keys
 # (the config does not expand environment variables, so $CREDENTIALS_DIRECTORY

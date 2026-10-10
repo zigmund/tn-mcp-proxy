@@ -45,27 +45,32 @@ oauth:
     - https://chatgpt.com/connector_platform_oauth_redirect
 
   # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
-  # /oauth/token (429 + Retry-After). Zero or unset values mean these defaults;
-  # they are generous because claude.ai and ChatGPT use shared egress IPs.
+  # /oauth/token, and of GET /oauth/authorize (429 + Retry-After). Zero or unset
+  # values mean these defaults; they are generous because claude.ai and ChatGPT
+  # use shared egress IPs.
   # rate_limit:
-  #   disabled: false
+  #   disabled: false                                  # also turns off authorize_global
   #   register:  { per_minute: 60,  burst: 30 }
   #   token:     { per_minute: 300, burst: 100 }
   #   authorize: { per_minute: 30,  burst: 10 }
   #   authorize_form: { per_minute: 300, burst: 100 }  # GET /oauth/authorize
+  #   # Unkeyed ceiling on submissions about to get a code. Default is derived
+  #   # from code_ttl (2500 per minute at 5m), so the code cache cannot fill.
+  #   # authorize_global: { per_minute: 2500, burst: 2500 }
 
 # Limits on the proxied MCP paths (429 + Retry-After per IP / per grant, 503 when
 # the global in-flight cap is reached). Zero or unset means these defaults,
 # -1 disables a single limit, "disabled: true" turns all of them off.
 # limits:
 #   ip:    { per_minute: 1200, burst: 300 }   # per client IP, before token check
-#   token: { per_minute: 300,  burst: 60 }    # per grant (client + credentials)
+#   token: { per_minute: 300,  burst: 60 }    # per grant (upstream + required credentials, shared by all OAuth clients)
 #   max_concurrent_per_token: 32              # in-flight requests; an SSE stream counts as one
 #   max_in_flight: 1024                       # global, open SSE streams included; also Transport.MaxConnsPerHost
-#   max_request_body: 10485760                # bytes (413 beyond)
+#   max_request_body: 10485760                # bytes (413 beyond), at least 1024; cannot be disabled
 
 # Reverse proxies whose X-Forwarded-For / X-Real-IP are trusted for the client IP
-# (access log and rate limiting). CIDRs or bare IPs; default: loopback only.
+# (access log and rate limiting). CIDRs or bare IPs; default: loopback only
+# (127.0.0.0/8 and ::1/128); 0.0.0.0/0 and ::/0 are rejected.
 # Setting it replaces the default, so keep loopback if nginx runs locally.
 # trusted_proxies: ["127.0.0.0/8", "::1/128", "192.0.2.0/24"]
 
@@ -73,7 +78,7 @@ upstreams:
   - name: tn                       # [a-z0-9-]+, unique
     title: Tradernet               # shown on the authorize form (default: name)
     path: /tn/mcp                  # public path of literal segments [A-Za-z0-9._~-]; must not overlap /oauth, /.well-known, /healthz or other upstreams
-    url: https://tradernet.com/mcp/tn
+    url: https://tradernet.com/mcp/tn  # https unless loopback or allow_insecure_http
     credentials:                   # headers the user types into the form
       - { header: X-TN-API-Key,    label: API key }
       # WARNING: on a public server, without an allow-list anyone with valid
@@ -108,10 +113,13 @@ upstreams:
       # says the credentials are rejected the client gets 401 invalid_token and
       # re-authorizes, otherwise the original response is forwarded unchanged.
       recheck_on_tool_error: true
-    # Tool arguments that tools/call requests must not carry (case-insensitive;
-    # presence is enough). Tradernet tools accept api_key / api_secret as
-    # arguments, which would bypass the credentials injected as headers.
-    # Legitimate clients that authenticate with headers are unaffected.
+    # Tool arguments that tools/call requests must not carry (top-level keys of
+    # params.arguments, case-insensitive; presence is enough). Tradernet tools
+    # accept api_key / api_secret as arguments, which would bypass the
+    # credentials injected as headers. POST bodies are then read into memory and
+    # inspected, failing closed (400 / 415) on anything unparsable; see
+    # docs/configuration.md#forbidden-tool-arguments. Legitimate clients that
+    # authenticate with headers are unaffected.
     forbidden_arguments: [api_key, api_secret]
 
 # Optional built-in TLS (both files or neither); leave commented out when a

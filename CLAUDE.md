@@ -60,18 +60,61 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Go module `github.com/zigmund/tn-mcp-proxy`; the only dependency is `gopkg.in/yaml.v3`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+make build            # bin/tn-mcp-proxy, version from git describe
+make test             # go test -race ./... (fuzz seed corpora run as normal tests)
+make vet              # go vet ./...
+make lint             # golangci-lint, falls back to go vet when not installed
+make fmt              # gofmt -w .
+make test-scripts     # scripts/next-version_test.sh (release version logic)
+make fuzz FUZZTIME=30s  # every FuzzXxx target in turn
+go build -o /dev/null ./...   # compile check without producing a binary
 ```
+
+Before handing off: `gofmt -l .` is empty, and `go build`, `go vet ./...`,
+`go test -race ./...` and `make lint` pass. Releases are cut by the manual
+GitHub Actions workflow (see `docs/releasing.md`).
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+One binary (`cmd/tn-mcp-proxy`) is an OAuth 2.1 authorization server plus a
+reverse proxy for header-authenticated MCP upstreams. It is stateless: client
+ids, codes, access and refresh tokens are AES-256-GCM sealed blobs carrying the
+upstream credentials; the only state is bounded in-memory caches (single-use
+codes and refresh families, rate limiters, re-check verdicts). Single instance
+by design.
+
+- `internal/config`: strict YAML loading, defaults, validation, limit constants
+- `internal/seal`, `internal/tokens`: token encryption and payload types
+- `internal/oauth`: metadata, DCR, authorize form, token endpoint, OAuth rate limits
+- `internal/proxy`: per-upstream reverse proxy, `forbidden_arguments`
+  inspection, tool-error re-check, proxy limits
+- `internal/credcheck`: the `validate` MCP session (authorize form and re-check)
+- `internal/server`: handler tree, timeouts, HSTS, signals; `internal/certreload`:
+  TLS hot reload; `internal/httplog`: client IP and access log;
+  `internal/ratelimit`: buckets and concurrency slots; `internal/logging`: slog
+
+User docs live in `README.md` (quick start and pointers) and `docs/`
+(`configuration.md` for every key and limit, `architecture.md` for behavior,
+`releasing.md`). `docs/security/` holds published security reports: do not edit them.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Fail closed: anything not clearly accepted is refused (credential checks,
+  body inspection, full single-use caches).
+- Never log or echo secrets: no tokens, credential values, query strings or
+  request bodies; config errors name field paths, not values.
+- Config changes touch four places together: the struct and its doc comment in
+  `internal/config`, `docs/configuration.md`, `deploy/config.example.yaml`
+  (`TestExampleConfig` loads it) and, if user-visible, `README.md`. Keep the
+  README short and link to `docs/`.
+- Public repo: placeholders only (`mcp.example.com`, `REPLACE_ME`-style values),
+  no real keys, hosts, IPs or personal data. Do not mention security-report
+  finding ids outside `docs/security/`.
+- Tests are hermetic (`httptest` servers, fake MCP upstream in
+  `internal/oauth/mcpfake_test.go`, injectable clocks); table-driven where
+  natural, run with `-race`. Add a fuzz target for new parsers of untrusted input.
+- Handlers are mounted by exact pattern; time-bound or size-bound everything that
+  reads client input, except the proxied MCP paths, which may stream (SSE).

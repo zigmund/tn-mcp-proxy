@@ -90,7 +90,8 @@ sudo install -m 0755 tn-mcp-proxy_${VERSION}_${OS}_${ARCH}/tn-mcp-proxy /usr/loc
 tn-mcp-proxy -version
 ```
 
-The archive also contains `deploy/` (example config, systemd unit) and `docs/`.
+The archive also contains `deploy/` (example config, systemd unit), the `docs/*.md`
+files, `README.md` and `LICENSE`.
 
 ### From source
 
@@ -101,7 +102,8 @@ sudo install -m 0755 bin/tn-mcp-proxy /usr/local/bin/
 ```
 
 (`go install github.com/zigmund/tn-mcp-proxy/cmd/tn-mcp-proxy@latest` also
-works but puts the binary in `$GOPATH/bin`; copy it to `/usr/local/bin/`.)
+works but puts the binary in `$GOPATH/bin` and reports the version `dev`; copy
+it to `/usr/local/bin/`.)
 
 ## Configure
 
@@ -126,9 +128,8 @@ upstreams:
     validate: { tool: get_auth_info }   # check the keys with Tradernet before issuing a token
 ```
 
-To accept only your own API key, add `allowed_values: ["REPLACE_WITH_YOUR_API_KEY"]`
-to the `X-TN-API-Key` credential and `forbidden_arguments: [api_key, api_secret]`
-to the upstream; the allow-list requires `validate` (see
+To accept only your own API key, apply the `allowed_values` and
+`forbidden_arguments` lines from the warning above (see
 [Restricting access](docs/configuration.md#restricting-access)).
 
 Generate the token key (base64 of 32 random bytes) into a root-only file, one
@@ -182,8 +183,8 @@ when built-in TLS is enabled (the unit's `ExecReload` sends it) and is otherwise
 
 The service listens on plain HTTP by default, so terminate TLS in front of it.
 Alternatively set `tls.cert_file`/`tls.key_file` to serve HTTPS directly, with
-certificate hot reload (see [Built-in TLS](docs/configuration.md#built-in-tls)). A tested
-nginx snippet (no buffering, long timeouts, `X-Forwarded-For` overwrite, optional
+certificate hot reload (see [Built-in TLS](docs/configuration.md#built-in-tls)). An
+example nginx snippet (no buffering, long timeouts, `X-Forwarded-For` overwrite, optional
 extra rate limit for `/oauth/`) is in [docs/configuration.md](docs/configuration.md#reverse-proxy).
 `GET /healthz` returns 200 and is meant for local checks.
 
@@ -211,19 +212,12 @@ authenticated) inside the tokens that claude.ai holds, and are decrypted only
 to attach them to the request being forwarded.
 
 If the keys are later revoked, Tradernet does not answer `401`: it answers
-HTTP `200` with a tool error ("Invalid api key provided" and similar), so the
-connector would stay "connected" while every tool call fails. With
-`validate.recheck_on_tool_error: true` (the example config enables it for
-Tradernet) the proxy treats any tool error (`isError: true`) only as a trigger:
-it re-runs the upstream's `validate` credential check with the stored
-credentials, and only if that check rejects them does it answer `401
-invalid_token`, so claude.ai re-runs the flow and you can enter new keys. Other
-tool errors (bad ticker, closed market) are forwarded untouched. The proxy does
-not read the error text, so a wording change upstream does not break it. Only
-failed tool calls wait for the check (about a second; if the upstream hangs,
-up to `validate.timeout`, default 10 s); the verdict is cached
-for 60 seconds. See
-[docs/configuration.md](docs/configuration.md#re-check-on-tool-errors).
+HTTP `200` with a tool error, so the connector would stay "connected" while
+every tool call fails. `validate.recheck_on_tool_error: true` (enabled in the
+example config) makes the proxy re-run the `validate` check on a tool error and
+answer `401 invalid_token` only if the keys are really rejected, so claude.ai
+re-runs the flow and you can enter new keys; other tool errors pass untouched.
+See [docs/configuration.md](docs/configuration.md#re-check-on-tool-errors).
 An upstream that does answer `401` is handled without any configuration.
 
 ## Connect ChatGPT
@@ -266,12 +260,17 @@ If a key leaked: add a new key first (first in the file), then remove the
 leaked one and restart. Removing a key invalidates every token AND every
 registered client id sealed with it, so claude.ai re-registers and users have
 to reconnect the connector. Do not rely on a plain restart to cut off a leak
-(see the replay-cache note below).
+(see the note on restarts under Security notes).
 
 ## Security notes
 
-- Security audits: [docs/security/](docs/security/README.md).
+The threat model and mechanisms are in
+[docs/architecture.md](docs/architecture.md#security-considerations); the
+reports of the independent security audits are indexed in
+[docs/security/](docs/security/README.md).
+
 - No database or stored credentials; tokens are self-contained sealed blobs.
+  Anyone with the token keys can decrypt every issued token.
 - The host sees credentials in plaintext on the authorize form: run the proxy
   only on a host you trust, always behind TLS, and keep `public_url` on `https`
   (enforced: `http` is accepted only for loopback or with
@@ -282,49 +281,71 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   With it, a code is issued only for credentials the upstream accepts (the check
   is read-only, fails closed and never follows redirects; see
   [docs/configuration.md](docs/configuration.md#credential-validation)).
-- Optionally restrict who can use an upstream with `allowed_values` on a
-  non-secret credential (for example your own API key); it requires `validate`
-  and should be paired with `forbidden_arguments`. Credentials outside the
+- Restrict who can use an upstream with `allowed_values` on a non-secret
+  credential (for example your own API key), together with `validate` and
+  `forbidden_arguments` (see the warning at the top). Credentials outside the
   list get no token, and existing tokens stop working once a value is removed.
-  Recommended for a single-user deployment that is reachable from the internet;
-  without it, anyone with valid upstream credentials can use the server (and its
-  IP) and the proxy logs a startup warning. See
+  Without a list, anyone with valid upstream credentials can use the server (and
+  its IP) and the proxy logs a startup warning. See
   [docs/configuration.md](docs/configuration.md#restricting-access).
 - Run a single instance. Single-use authorization codes and refresh-token
-  families are tracked in bounded in-memory replay caches, so several instances
-  would not see each other's usage.
+  families are tracked in bounded in-memory caches, so several instances would
+  not see each other's usage.
 - A restart resets replay protection. An authorization code can be redeemed again
-  within `oauth.code_ttl` (PKCE still binds it to the client), a small window. A refresh token consumed before a restart is accepted
-  again (its family is forgotten) for up to `oauth.refresh_token_ttl`. Avoid
-  casual restarts after a suspected token leak; rotate keys instead (above).
-- Authorize URLs are shareable: one can be forwarded to someone else, has no
-  expiry and is not bound to a browser, so someone could send you a link whose
-  connector ends up with your credentials. Only continue on the form if you
-  started the connection yourself (the page says so too).
+  within `oauth.code_ttl` (PKCE still binds it to the client), a small window. A
+  refresh token consumed before a restart is accepted again (its family is
+  forgotten) for up to `oauth.refresh_token_ttl`. Avoid casual restarts after a
+  suspected token leak; rotate keys instead (above).
+- Refresh tokens are single-use and rotated on every refresh; presenting an
+  already used one revokes its whole chain (the user reconnects). A login also
+  has an absolute lifetime, `oauth.max_session_ttl` (default 2160h = 90 days)
+  from the original login, which refreshing never extends. Disconnecting a
+  connector in claude.ai or ChatGPT revokes nothing on the proxy (there is no
+  revocation endpoint): its chain stays valid until its idle expiry or the
+  session cap, whichever comes first. To cut everyone off, rotate the token keys
+  and remove the old one.
+- Registration is open, so anyone can register a client with any `client_name`,
+  including a look-alike of a known one. The authorize page therefore names the
+  application by the host it returns to (`<host> is requesting access to ...`),
+  shows the self-declared name only as a secondary line labelled
+  "unverified", and only allowlisted redirect URIs are accepted. Check the host
+  before entering credentials, and only continue if you started the connection
+  yourself: an authorize link can be forwarded to someone else.
+- Rate limits: the OAuth endpoints are limited per client IP by the app itself
+  (`oauth.rate_limit`, with a global ceiling on code issuance), and the proxied
+  MCP paths have their own rate, concurrency and body limits (`limits`). Excess
+  requests get `429` with `Retry-After`, or `503` for the global in-flight cap.
+  The client IP honours `X-Forwarded-For` only from `trusted_proxies` (loopback
+  by default; add your CDN or load balancer there). See
+  [docs/configuration.md](docs/configuration.md#rate-limiting) and
+  [Proxy limits](docs/configuration.md#proxy-limits).
 - Upstream traffic ignores `HTTP_PROXY`/`HTTPS_PROXY`, so credential headers are
   never sent through an environment proxy.
-- Registration is open, so anyone can register a client with any `client_name`, including a look-alike of a known one. The authorize page therefore names the application by the host it returns to ("<host> is requesting access to ..."), shows the self-declared name only as a secondary, labelled "unverified" line, and only allowlisted redirect URIs are accepted. Check the host before entering credentials.
-- Refresh tokens are single-use and rotated on every refresh; presenting an already used one revokes its whole chain (the user reconnects).
-- A login has an absolute lifetime: refreshing slides the expiry by `oauth.refresh_token_ttl`, but never past `oauth.max_session_ttl` (default 2160h = 90 days) from the original login, after which the user reconnects. Upgrade note: refresh tokens issued before this limit existed get a fresh `max_session_ttl` window at their first refresh.
-- Disconnecting a connector in claude.ai or ChatGPT does not revoke anything on the proxy (there is no revocation endpoint). Its refresh chain stays valid until the `oauth.refresh_token_ttl` idle expiry or `oauth.max_session_ttl`, whichever comes first. To cut everyone off, rotate the token keys and remove the old one.
-- Redirect URIs are restricted to `oauth.allowed_redirect_uris` (claude.ai, claude.com and ChatGPT callbacks by default; ChatGPT's stable callback relies on the RFC 9207 `iss` parameter the proxy returns).
-- `POST /oauth/register`, `/oauth/authorize` and `/oauth/token` (and `GET /oauth/authorize`, with its own, larger budget) are rate limited by the app itself (generous defaults, `oauth.rate_limit`; excess requests get 429 with `Retry-After`). IPv4 clients are limited per address; IPv6 clients per `/64`, `/56` and `/48` (a request must fit all three budgets), so rotating `/64`s inside a routed prefix does not multiply the allowance. `POST /oauth/authorize` additionally has a global ceiling derived from the code cache size and `oauth.code_ttl` (2 500 per minute by default), so the authorization-code cache cannot fill; if it still did, it fails closed with 503. Revoked refresh families are kept in a separate bounded set until their expiry, outside the LRU that attacker-created families can churn: a revoked chain is not re-opened by cache pressure. The active-family cache evicts the least recently used chains when full, at the cost that reuse detection is lost for evicted chains (they just refresh as a new family; nothing locks out). If the revocation set itself ever fills (about a million live revocations), unknown families (new logins, and active chains already evicted from the LRU) are refused with 503 on refresh rather than risking a revoked one; chains still in the LRU keep refreshing. The client IP honours `X-Forwarded-For` only from `trusted_proxies` (loopback by default); add your CDN or load balancer there. A reverse-proxy `limit_req` (the nginx snippet has one) is an optional extra layer. Details and the attacker cost are in [docs/architecture.md](docs/architecture.md). See [docs/configuration.md](docs/configuration.md#rate-limiting).
 - Tokens, credentials and query strings are never logged.
-- The service runs as a dynamic unprivileged user under a restrictive systemd sandbox.
+- The service runs as a dynamic unprivileged user under a restrictive systemd
+  sandbox.
 
 ## Development
 
 ```sh
+make build                # binary in bin/ (version from git describe)
 make test                 # go test -race ./... (fuzz seed corpora run as ordinary tests)
+make vet                  # go vet ./...
 make lint                 # golangci-lint, or go vet when it is not installed
+make fmt                  # gofmt -w .
+make test-scripts         # tests of scripts/next-version.sh
 make fuzz FUZZTIME=30s    # run every fuzz target in turn, FUZZTIME each (default 30s)
 ```
 
-A full `make fuzz` at the default 30s takes about 7 minutes or more (14 targets, one after another).
+`make build-linux` cross-compiles a static linux/amd64 binary and `make clean`
+removes `bin/`. A full `make fuzz` runs the targets one after another, so it
+takes (number of targets) x `FUZZTIME` plus build time.
 `make fuzz` discovers every `func FuzzXxx(*testing.F)` in the `_test.go` files,
 so new targets need no Makefile change. The targets cover token sealing, bearer
-and client-authentication parsing, PKCE, redirect construction and the
-`/oauth/authorize` and `/oauth/token` handlers. A failing input is saved as
+and client-authentication parsing, PKCE, redirect construction, the
+`/oauth/authorize` and `/oauth/token` handlers, proxy authentication, and the
+parsers for upstream tool errors, `Accept-Encoding` and credential-check
+responses. A failing input is saved as
 `testdata/fuzz/<FuzzName>/<hash>` next to the package. Fix the bug, then commit
 that file as a regression seed: `go test` replays it from then on. Fuzzing is
 not part of CI or the release workflow.
@@ -336,9 +357,10 @@ Releases are cut from `main` by a GitHub Actions workflow; see
 
 ## Documentation
 
-- [docs/configuration.md](docs/configuration.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/releasing.md](docs/releasing.md)
+- [docs/configuration.md](docs/configuration.md): every config key, limits, logging, TLS, reverse proxy
+- [docs/architecture.md](docs/architecture.md): OAuth flow, proxying, token sealing, server lifecycle
+- [docs/releasing.md](docs/releasing.md): cutting a release
+- [docs/security/](docs/security/README.md): security reports
 
 ## License
 

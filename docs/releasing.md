@@ -41,9 +41,11 @@ Run locally to preview: `scripts/next-version.sh minor rc` (uses local tags; run
 
 ## What the workflow does
 
-1. `test` job: checks the ref is `main`, runs the script tests, computes the version from remote tags, validates it (semver format, valid ref name, tag free on the remote), writes the job summary, then runs `go vet`, `go test -race ./...` and golangci-lint (pinned version). The version is exported as a job output.
+1. `test` job: checks the ref is `main`, runs the script tests, computes the version from remote tags, validates it (semver format, valid ref name, tag free on the remote), writes the job summary, then runs `go vet`, `go test -race ./...` and golangci-lint (pinned version; `make lint` runs the same linter when it is installed). Fuzzing is not part of the workflow. The version is exported as a job output.
 2. `release` job (the only one with `contents: write`): uses the version from the `test` job output, creates an annotated tag on the checked-out commit as `github-actions[bot]`, pushes it, then runs `goreleaser release --clean` with `GITHUB_TOKEN`.
 3. GoReleaser publishes the GitHub Release with GitHub-generated release notes.
+
+All actions and the GoReleaser and golangci-lint versions are pinned (actions to full commit SHAs); Dependabot (`.github/dependabot.yml`) proposes weekly updates for the actions and the Go modules. The release job builds without a cache.
 
 Only one release runs at a time (`concurrency: release`). Releases are published non-draft, so failures need manual cleanup (see below). Because the version is computed before the gates run and the tag is pushed afterwards, a tag created by someone else in between makes the push fail; just re-run.
 
@@ -64,8 +66,10 @@ Per release, for `linux` and `darwin` on `amd64` and `arm64`:
 
 - `tn-mcp-proxy_<version>_<os>_<arch>.tar.gz`, extracting into a wrapping directory of the same name (without `.tar.gz`) that contains:
   - `tn-mcp-proxy` (static binary, `CGO_ENABLED=0`, `-trimpath`, version injected via `-X main.version`, reported as `v1.2.3`)
-  - `docs/*.md`, `deploy/` (recursive: example config, and deployment files when present), plus `README*` and `LICENSE*` if they exist
+  - `README.md`, `LICENSE`, the top-level `docs/*.md` files (not `docs/security/` or `docs/images/`) and the files of `deploy/` (example config, systemd unit)
 - `checksums.txt` (sha256)
+
+The patterns are in `.goreleaser.yaml`; its `ldflags` must stay in sync with the `LDFLAGS` of the `Makefile`.
 
 `<version>` in file names has no `v` prefix (`1.2.3`).
 
@@ -79,7 +83,7 @@ shasum -a 256 --ignore-missing -c checksums.txt # macOS
 ## Building locally
 
 ```sh
-make build                                        # host binary in bin/
+make build                                        # host binary in bin/, version from `git describe`
 goreleaser release --snapshot --clean --skip=publish   # all archives in dist/
 ```
 

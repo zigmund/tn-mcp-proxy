@@ -341,6 +341,14 @@ func TestExampleConfig(t *testing.T) {
 	if cfg.TLSEnabled() {
 		t.Error("tls should be disabled in example")
 	}
+	// The example documents the recommended hardening; keep it enabled.
+	u := cfg.Upstreams[0]
+	if u.Validate == nil || u.Validate.Tool != "get_auth_info" || !u.Validate.RecheckOnToolError {
+		t.Errorf("example upstream lost its validate block: %+v", u.Validate)
+	}
+	if !slices.Equal(u.ForbiddenArguments, []string{"api_key", "api_secret"}) {
+		t.Errorf("example upstream forbidden_arguments = %v", u.ForbiddenArguments)
+	}
 }
 
 func TestSlogLevel(t *testing.T) {

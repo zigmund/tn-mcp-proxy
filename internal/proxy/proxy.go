@@ -33,8 +33,9 @@ const (
 	keepAlive           = 30 * time.Second
 	maxIdlePerHost      = 64
 
-	// maxRequestBody caps the client request body forwarded upstream.
-	maxRequestBody = 10 << 20
+	// maxRequestBody is the default cap on the client request body forwarded
+	// upstream; limits.max_request_body overrides it.
+	maxRequestBody = config.DefaultMaxRequestBody
 )
 
 // forwardedHeaders is the allow-list of client request headers relayed
@@ -70,6 +71,8 @@ type handler struct {
 	// error in a 200 response triggers a credential re-check, and a rejection
 	// becomes 401 invalid_token. Nil means the feature is off.
 	rechecker *Rechecker
+	// limits holds the rate, concurrency and body limits; never nil after New.
+	limits *Limits
 }
 
 // Option configures a handler.
@@ -82,6 +85,17 @@ func WithRechecker(r *Rechecker) Option {
 	return func(h *handler) {
 		if r != nil {
 			h.rechecker = r
+		}
+	}
+}
+
+// WithLimits shares one Limits (per-IP budget, per-grant state and the global
+// in-flight cap) between handlers. Without it each handler gets its own with
+// the default limits.
+func WithLimits(l *Limits) Option {
+	return func(h *handler) {
+		if l != nil {
+			h.limits = l
 		}
 	}
 }
@@ -128,22 +142,30 @@ func New(up config.Upstream, publicURL string, s *seal.Sealer, log *slog.Logger,
 	} else {
 		h.rechecker = nil // the feature is configured per upstream
 	}
+	if h.limits == nil {
+		h.limits = NewLimits(config.ProxyLimits{}, log)
+	}
 	h.rp = &httputil.ReverseProxy{
 		Rewrite:        h.rewrite,
 		ModifyResponse: h.modifyResponse,
 		ErrorHandler:   h.errorHandler,
 		FlushInterval:  -1, // flush every write: SSE events must not be buffered
-		Transport:      newTransport(),
+		Transport:      newTransport(h.limits.maxConns()),
 		ErrorLog:       slog.NewLogLogger(h.log.Handler(), slog.LevelWarn),
 	}
 	return h, nil
 }
 
-func newTransport() *http.Transport {
+// newTransport builds the upstream transport. maxConns > 0 sets
+// MaxConnsPerHost; requests beyond it would queue inside the transport, which
+// is why the handler enforces the same number as a global in-flight cap first
+// and answers 503 instead.
+func newTransport(maxConns int) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: keepAlive}).DialContext
 	t.TLSHandshakeTimeout = tlsHandshakeTimeout
 	t.MaxIdleConnsPerHost = maxIdlePerHost
+	t.MaxConnsPerHost = maxConns
 	t.DisableCompression = true // pass bytes through opaquely; no gzip delaying SSE
 	return t
 }
@@ -170,15 +192,32 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upgrade not supported", http.StatusBadRequest)
 		return
 	}
+	// Order: method and path (above, free) -> per-IP rate (before the token is
+	// opened, so unauthenticated floods are cut cheaply) -> authentication ->
+	// body size -> per-grant rate -> per-grant concurrency -> global in-flight
+	// cap. A refusal gives back everything taken before it.
+	ipKeys, ok := h.limits.chargeIP(w, r)
+	if !ok {
+		return
+	}
 	creds, ok := h.authenticate(w, r)
 	if !ok {
 		return
 	}
-	if r.ContentLength > maxRequestBody {
+	maxBody := h.limits.maxBody()
+	if r.ContentLength > maxBody {
+		h.limits.refundIP(ipKeys) // a cheap rejection, not abuse of the budget
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	release, ok := h.limits.admit(w, ipKeys, grantKey(h.up.Name, creds))
+	if !ok {
+		return
+	}
+	// Held until the response, a long-lived SSE stream included, has ended or
+	// the client has gone: ReverseProxy.ServeHTTP returns then.
+	defer release()
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	h.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), credsKey{}, creds)))
 }
 

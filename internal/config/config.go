@@ -110,13 +110,14 @@ var (
 
 // Config is the root configuration.
 type Config struct {
-	Listen    string     `yaml:"listen"`
-	PublicURL string     `yaml:"public_url"`
-	Log       Log        `yaml:"log"`
-	Secrets   Secrets    `yaml:"secrets"`
-	OAuth     OAuth      `yaml:"oauth"`
-	Upstreams []Upstream `yaml:"upstreams"`
-	TLS       TLS        `yaml:"tls"`
+	Listen    string      `yaml:"listen"`
+	PublicURL string      `yaml:"public_url"`
+	Log       Log         `yaml:"log"`
+	Secrets   Secrets     `yaml:"secrets"`
+	OAuth     OAuth       `yaml:"oauth"`
+	Limits    ProxyLimits `yaml:"limits"`
+	Upstreams []Upstream  `yaml:"upstreams"`
+	TLS       TLS         `yaml:"tls"`
 
 	// AllowInsecureHTTP lets public_url, allowed_redirect_uris and upstream
 	// URLs use plain http for non-loopback hosts. Off by default.
@@ -429,6 +430,7 @@ func (c *Config) applyDefaults() {
 	if c.TLSEnabled() && c.TLS.ReloadInterval == 0 {
 		c.TLS.ReloadInterval = DefaultReloadInterval
 	}
+	c.Limits = c.Limits.Resolved()
 	if len(c.TrustedProxies) == 0 {
 		c.TrustedProxies = DefaultTrustedProxies()
 	}
@@ -670,6 +672,7 @@ func (c *Config) validate() []error {
 	if c.TLS.ReloadInterval < 0 {
 		add("tls.reload_interval: must be a positive duration")
 	}
+	errs = append(errs, c.Limits.validate()...)
 	return errs
 }
 

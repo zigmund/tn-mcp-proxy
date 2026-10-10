@@ -54,6 +54,16 @@ oauth:
   #   authorize: { per_minute: 30,  burst: 10 }
   #   authorize_form: { per_minute: 300, burst: 100 }  # GET /oauth/authorize
 
+# Limits on the proxied MCP paths (429 + Retry-After per IP / per grant, 503 when
+# the global in-flight cap is reached). Zero or unset means these defaults,
+# -1 disables a single limit, "disabled: true" turns all of them off.
+# limits:
+#   ip:    { per_minute: 1200, burst: 300 }   # per client IP, before token check
+#   token: { per_minute: 300,  burst: 60 }    # per grant (client + credentials)
+#   max_concurrent_per_token: 32              # in-flight requests; an SSE stream counts as one
+#   max_in_flight: 1024                       # global, open SSE streams included; also Transport.MaxConnsPerHost
+#   max_request_body: 10485760                # bytes (413 beyond)
+
 # Reverse proxies whose X-Forwarded-For / X-Real-IP are trusted for the client IP
 # (access log and rate limiting). CIDRs or bare IPs; default: loopback only.
 # Setting it replaces the default, so keep loopback if nginx runs locally.

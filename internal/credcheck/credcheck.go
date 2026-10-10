@@ -74,6 +74,9 @@ type Checker struct {
 
 func New() *Checker {
 	t := http.DefaultTransport.(*http.Transport).Clone()
+	// Credentials travel in request headers: never route the check through an
+	// HTTP(S)_PROXY from the environment, which would see them.
+	t.Proxy = nil
 	t.DialContext = (&net.Dialer{Timeout: checkDialTimeout}).DialContext
 	t.TLSHandshakeTimeout = checkDialTimeout
 	t.DisableCompression = true

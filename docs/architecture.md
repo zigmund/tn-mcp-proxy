@@ -452,8 +452,10 @@ not use browser CORS preflight for this endpoint. The request body is capped at
 upstream handlers. Per request: per-IP token bucket (before the token is
 opened) -> authentication -> body size -> per-grant token bucket -> per-grant
 concurrency slot -> global in-flight slot. The grant key is a SHA-256 over
-upstream name and the injected credential headers (access tokens carry no refresh
-family id), so it survives refresh and never exposes a credential. A refusal at
+upstream name and the required credential headers only (access tokens carry no
+refresh family id), so it survives refresh and never exposes a credential.
+Optional credentials (for example the Tradernet SID, which `validate` does not
+check) are left out: varying them does not buy a fresh budget. A refusal at
 any step refunds the earlier tokens and slots; slots are released when
 `ReverseProxy.ServeHTTP` returns, i.e. when a response or SSE stream ends or the
 client disconnects, and no deadline is imposed on either. A 413 for a declared oversize body refunds the IP token. Excess is 429 with
@@ -547,7 +549,7 @@ Cost control (in-process, bounded; the rest of the service stays stateless):
 
 - Verdict cache keyed by an HMAC-SHA256 (random per-process key) of the upstream
   name and the canonical credentials, so plaintext credentials are neither map
-  keys nor logged. Accepted and rejected verdicts live 60 s; "no verdict" 5 s,
+  keys nor logged. Accepted, rejected and "no verdict" all live 60 s,
   so an outage is not hammered. At most 4096 entries, oldest evicted first.
 - Concurrent re-checks for the same key share one session (single flight). The
   session runs detached from any one client and is bounded by
@@ -556,7 +558,16 @@ Cost control (in-process, bounded; the rest of the service stays stateless):
   re-check is skipped and the response passes through.
 
 So a burst of tool errors from one token costs at most one validation session
-per minute.
+per minute, also while the upstream is down (the "no verdict" answer is cached
+too). Only saturation (the 8-check cap) is not cached. The price of the cached
+"no verdict" is that a revocation is noticed up to a minute after the upstream
+recovers.
+
+The OAuth refresh grant reads the same verdict cache, and only the cache (no
+upstream call from the token endpoint): while a live verdict says the token's
+credentials are rejected, `refresh_token` answers `invalid_grant`, so a client
+that refreshes after the 401 must re-run the authorization flow instead of
+looping. No verdict, or an accepted one, leaves refresh untouched.
 
 Compression: the stdlib has no brotli, and Tradernet answers `br` when the
 client offers it. For `POST`s of an upstream with the option on, the proxy

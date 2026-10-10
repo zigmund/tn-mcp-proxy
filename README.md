@@ -282,6 +282,12 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   within `oauth.code_ttl` (PKCE still binds it to the client), a small window. A refresh token consumed before a restart is accepted
   again (its family is forgotten) for up to `oauth.refresh_token_ttl`. Avoid
   casual restarts after a suspected token leak; rotate keys instead (above).
+- Authorize URLs are shareable: one can be forwarded to someone else, has no
+  expiry and is not bound to a browser, so someone could send you a link whose
+  connector ends up with your credentials. Only continue on the form if you
+  started the connection yourself (the page says so too).
+- Upstream traffic ignores `HTTP_PROXY`/`HTTPS_PROXY`, so credential headers are
+  never sent through an environment proxy.
 - Registration is open, so anyone can register a client with any `client_name`, including a look-alike of a known one. The authorize page therefore names the application by the host it returns to ("<host> is requesting access to ..."), shows the self-declared name only as a secondary, labelled "unverified" line, and only allowlisted redirect URIs are accepted. Check the host before entering credentials.
 - Refresh tokens are single-use and rotated on every refresh; presenting an already used one revokes its whole chain (the user reconnects).
 - A login has an absolute lifetime: refreshing slides the expiry by `oauth.refresh_token_ttl`, but never past `oauth.max_session_ttl` (default 2160h = 90 days) from the original login, after which the user reconnects. Upgrade note: refresh tokens issued before this limit existed get a fresh `max_session_ttl` window at their first refresh.

@@ -96,10 +96,11 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Ha
 	inner := http.NewServeMux()
 	// One resolver for the access log and the rate limiter, so they agree.
 	res := httplog.NewResolver(cfg.TrustedNets)
-	oauth.New(cfg, sealer, log, oauth.WithClientIP(res.ClientIP)).Register(inner)
 	// One re-checker for all upstreams: a shared verdict cache and one global
-	// cap on concurrent credential re-checks.
+	// cap on concurrent credential re-checks. The OAuth server reads the same
+	// cache so that a refresh does not revive credentials found rejected.
 	rechecker := proxy.NewRechecker(log)
+	oauth.New(cfg, sealer, log, oauth.WithClientIP(res.ClientIP), oauth.WithRejectionSource(rechecker)).Register(inner)
 	// One Limits for all upstreams: a shared per-IP budget and in-flight cap.
 	limits := proxy.NewLimits(cfg.Limits, log, proxy.WithClientIP(res.ClientIP))
 	for _, up := range cfg.Upstreams {

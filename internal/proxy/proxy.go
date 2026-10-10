@@ -162,6 +162,10 @@ func New(up config.Upstream, publicURL string, s *seal.Sealer, log *slog.Logger,
 // and answers 503 instead.
 func newTransport(maxConns int) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
+	// Credentials travel in request headers: never route upstream traffic
+	// through an HTTP(S)_PROXY from the environment, which would see them
+	// (in clear text for an http upstream, as CONNECT target for https).
+	t.Proxy = nil
 	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: keepAlive}).DialContext
 	t.TLSHandshakeTimeout = tlsHandshakeTimeout
 	t.MaxIdleConnsPerHost = maxIdlePerHost
@@ -210,7 +214,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	release, ok := h.limits.admit(w, ipKeys, grantKey(h.up.Name, creds))
+	release, ok := h.limits.admit(w, ipKeys, grantKey(h.up.Name, h.grantCreds(creds)))
 	if !ok {
 		return
 	}
@@ -219,6 +223,23 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer release()
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	h.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), credsKey{}, creds)))
+}
+
+// grantCreds returns the credentials that identify the grant for the per-grant
+// limits: the required ones only. Optional credentials are not checked by
+// validate (get_auth_info ignores X-TN-SID, for one), so a client could vary
+// them freely and would otherwise get a fresh budget for every value.
+func (h *handler) grantCreds(creds map[string]string) map[string]string {
+	out := make(map[string]string, len(creds))
+	for _, c := range h.hdrs {
+		if c.optional {
+			continue
+		}
+		if v, ok := creds[c.name]; ok {
+			out[c.name] = v
+		}
+	}
+	return out
 }
 
 // authenticate validates the bearer token and returns the credentials to

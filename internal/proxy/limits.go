@@ -204,7 +204,10 @@ func retryAfterSeconds(d time.Duration) string {
 
 // grantKey identifies a grant for the per-token limits without using (or
 // retaining) the bearer token or any credential value as a key: a SHA-256 over
-// the upstream name and the credential headers the proxy injects. It is
+// the upstream name and the credential headers passed in. Callers pass only
+// the required credentials (handler.grantCreds): optional ones are not
+// verified by validate, so including them would let one verified key pair
+// mint any number of grants by varying, say, the SID. It is
 // stable across access token refreshes and independent of client_id, so
 // registering more OAuth clients (dynamic client registration is open) does
 // not buy a fresh budget for the same credentials. Access tokens carry no

@@ -180,6 +180,10 @@ never re-rendered.
 - **Concurrency cap.** At most 16 checks run at once across all upstreams; a
   check that cannot start within its timeout is "unavailable". Waiting for a
   slot counts toward `validate.timeout`.
+- **Environment proxies are ignored.** Upstream traffic (proxied requests and
+  credential checks) never uses `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`: the
+  credential headers must not pass through a third party. Reach the upstream
+  directly or through network-level routing.
 - **Redirects are not followed**, so the credential headers can never be
   forwarded to another host; a `3xx` answer is "unavailable".
 - **Read-only tool.** The tool runs on every form submission with whatever
@@ -247,13 +251,19 @@ error text.
   unaffected beyond reading up to 64 KiB of the body before forwarding it (a
   slow `application/json` response is held until it ends or passes the cap).
 - **Cost control.** All state is in memory and bounded. Verdicts are cached
-  for 60 s (accepted and rejected; "no verdict" for 5 s) under a keyed hash of
+  for 60 s (accepted, rejected and "no verdict") under a keyed hash of
   the upstream name and credentials, so no plaintext credentials are kept; the
   cache holds at most 4096 entries and evicts the oldest. Concurrent checks for
   the same credentials share one session. At most 8 checks run at once across
   all upstreams; when saturated the check is skipped and the response passes
-  through. A burst of tool errors from one token costs at most one session per
-  minute.
+  through (saturation is not cached). A burst of tool errors from one token costs
+  at most one session per minute, also during an upstream outage; a revocation
+  can be noticed up to a minute after the upstream recovers. The `refresh_token`
+  grant consults the same cache and, while credentials are cached as rejected,
+  answers `invalid_grant` (no upstream call), so clients re-run authorization
+  instead of refreshing into another 401. The refusal is best-effort and
+  bounded by the verdict TTL (60 s): once the verdict expires a refresh succeeds
+  again, until the next tool error re-triggers the check.
 - **Compression.** For these `POST`s the outbound `Accept-Encoding` is narrowed
   to `gzip` (when the client accepted it) or `identity`, because the proxy
   cannot decode brotli or zstd. A gzip body is decoded only to inspect it; the
@@ -458,7 +468,9 @@ This differs from `oauth.rate_limit`, which only has the all-or-nothing
 `disabled`.
 
 - **Grant.** The per-token limits are keyed by a SHA-256 over the upstream
-  name and the credential headers (names and values) the proxy injects. One
+  name and the required credential headers (names and values) the proxy injects;
+  optional credentials (`optional: true`, such as a SID that `validate` does not
+  check) are not part of it, so varying them gives no fresh budget. One
   set of upstream credentials is one user: the key stays the same when the
   access token is refreshed and is shared by all OAuth clients of that user,
   so registering more clients does not buy a fresh budget. The raw token and

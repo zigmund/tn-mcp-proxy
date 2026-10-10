@@ -21,12 +21,12 @@ Error messages never echo URL or key material.
 | `oauth.max_session_ttl` | `2160h` (90 days) | Positive duration; absolute lifetime of a login, counted from the code exchange and never extended by refreshing. Once it has passed, the refresh grant fails with `invalid_grant` and the user must reconnect; refresh and access token expiry (and `expires_in`) are capped at the session end. Refresh tokens issued before this setting existed carry no start time: their first refresh after an upgrade starts a fresh window, so existing logins get a full `max_session_ttl` from then on. There is no upper bound |
 | `oauth.code_ttl` | `5m` | Positive duration, at most `10m` (OAuth 2.1); lifetime of an authorization code from submission of the credentials form. Codes are single-use |
 | `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute https URLs (http only for loopback or with `allow_insecure_http`), no duplicates |
-| `oauth.rate_limit.disabled` | `false` | Turns the in-app per-IP rate limiting of the OAuth endpoints off. See [Rate limiting](#rate-limiting) |
+| `oauth.rate_limit.disabled` | `false` | Turns the in-app rate limiting of the OAuth endpoints off: the per-IP limits and the global authorize ceiling. See [Rate limiting](#rate-limiting) |
 | `oauth.rate_limit.register` | `per_minute: 60`, `burst: 30` | Limit for `POST /oauth/register` |
 | `oauth.rate_limit.token` | `per_minute: 300`, `burst: 100` | Limit for `POST /oauth/token` |
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
 | `oauth.rate_limit.authorize_form` | `per_minute: 300`, `burst: 100` | Limit for `GET /oauth/authorize` (rendering the form; each one seals a request, hence a generous but finite limit) |
-| `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on all `POST /oauth/authorize` requests together. See [Rate limiting](#rate-limiting) |
+| `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on the `POST /oauth/authorize` submissions that are about to get a code. `burst` defaults to `per_minute`; setting `burst` needs `per_minute` too. See [Rate limiting](#rate-limiting) |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
@@ -34,8 +34,10 @@ Error messages never echo URL or key material.
 | `tls.reload_interval` | `1m` | How often the files are checked for changes. Positive duration; `0` or unset means the default. SIGHUP reloads immediately regardless |
 
 For all durations, `0` or unset means the default; negative values are rejected.
-The same holds for `per_minute` and `burst` of every rate limit (a zero value is
-replaced by its default; to switch limiting off use `oauth.rate_limit.disabled`).
+The same holds for `per_minute` and `burst` of every `oauth.rate_limit` entry (a
+zero value is replaced by its default; to switch limiting off use
+`oauth.rate_limit.disabled`). `limits.*` differs: `-1` disables an individual
+limit (see [Proxy limits](#proxy-limits)).
 
 Relative `secrets.token_keys_file`, `tls.cert_file` and `tls.key_file` paths are
 resolved against the config file's directory.
@@ -69,7 +71,7 @@ in logs, `fmt`, JSON and YAML output.
 | `name` | required | Unique, `[a-z0-9-]+` |
 | `title` | `name` | Shown on the authorize form. Clients select the upstream with the `resource` parameter (`public_url` + `path`), which may be omitted only with exactly one upstream |
 | `path` | required | Matches `^(/[A-Za-z0-9._~-]+)+$`, no `.`/`..` segments, no trailing slash. Must not equal or overlap `/oauth`, `/.well-known`, `/healthz`; no upstream path may be a segment-wise prefix of another |
-| `url` | required | Absolute http(s) URL, no userinfo/fragment |
+| `url` | required | Absolute URL without userinfo or fragment; `https` unless the host is loopback or `allow_insecure_http` is set (see [Transport security](#transport-security)). Requests go to it exactly as written; the client's query string is forwarded only when this URL has none of its own |
 | `credentials[]` | at least one non-optional | Headers the user supplies |
 | `validate` | absent (no validation) | Optional. Verify the entered credentials against the upstream before a code is issued. Required when any credential has `allowed_values`. See [Credential validation](#credential-validation) |
 | `forbidden_arguments` | absent | Optional list of tool argument names (case-insensitive) rejected in `tools/call` requests, for example `[api_key, api_secret]`. See [Forbidden tool arguments](#forbidden-tool-arguments) |
@@ -77,7 +79,7 @@ in logs, `fmt`, JSON and YAML output.
 Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
 input), `optional`, `allowed_values` (optional list of accepted values, see
-[Restricting access](#restricting-access)). Each credential becomes one input on the authorize form; values are trimmed and must not contain control characters.
+[Restricting access](#restricting-access)). Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
 
 `validate` fields: `tool` (required, MCP tool called with the entered
 credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
@@ -122,7 +124,6 @@ Rules:
   of them must match.
 - Matching is exact (case-sensitive) after trimming surrounding whitespace, the
   same normalization the authorize form applies, and constant-time.
-
 - An upstream with `allowed_values` must also set `validate`; otherwise
   startup fails with `allowed_values requires validate`.
 
@@ -134,18 +135,22 @@ arguments, which some upstreams accept as a documented fallback. That is what
 `forbidden_arguments` is for (below).
 
 Enforcement: `POST /oauth/authorize` refuses a value outside the list with the
-same message as a rejected credential, before any upstream call and before
-anything is sealed; the `refresh_token` grant answers `invalid_grant`; every
-proxied request answers `401 invalid_token`. So removing a value from the list
-and restarting cuts off tokens already issued for it. The message is identical,
+same message and status (`400`) as a rejected credential, before any upstream
+call and before anything is sealed; the `authorization_code` and
+`refresh_token` grants answer `invalid_grant`; every proxied request answers
+`401 invalid_token`. So removing a value from the list and restarting cuts off
+tokens already issued for it. The comparison is made on SHA-256 digests with
+`crypto/subtle`, against every entry (it does not stop at the first match). The message is identical,
 but the timing is not: a refusal by the list returns without an upstream round
 trip, while a listed key with a wrong secret waits for the credential check. An
 observer can therefore infer by timing that a list exists and whether a
 candidate API key is on it. The comparison itself is constant-time and the
 secret is still required.
 
-Without any list on an upstream, startup logs one warning for that upstream. A
-list without `forbidden_arguments` also logs a warning.
+Without any list on an upstream, startup logs one `warn` for that upstream
+(`upstream has no allowed_values: ...`). An upstream with a list but without
+`forbidden_arguments` gets its own `warn`. Both name the upstream and never a
+value.
 
 ### Forbidden tool arguments
 
@@ -153,36 +158,40 @@ list without `forbidden_arguments` also logs a warning.
 forbidden_arguments: [api_key, api_secret]   # upstream-level, next to credentials
 ```
 
-When set, POST bodies on the MCP path are inspected: a JSON-RPC `tools/call`
-whose `params.arguments` object contains any listed name (case-insensitive;
-presence counts even if the value is null or empty) is answered with HTTP 400
-and a JSON-RPC error (`code` -32602, `argument not allowed: <name>`; `id` is
-the request id when it is a string, number or null, else null) and never reaches
-the upstream. A batch is rejected as a whole if any element offends (`id` null).
-Only the top level of `arguments` is checked.
+When set, POST bodies on the MCP path are inspected after the proxy limits have
+admitted the request. A JSON-RPC `tools/call` whose `params.arguments` object
+contains any listed name (case-insensitive; presence counts even if the value is
+null or empty) is answered with HTTP 400 and a JSON-RPC error (`code` -32602,
+`argument not allowed: <name>` with the configured name; `id` is the request id
+when it is a string, number or null, else null) and never reaches the upstream.
+A batch is rejected as a whole if any element offends (`id` null). Only the top
+level of `arguments` is checked, and only POST bodies are inspected.
 
 The inspection fails closed, because the upstream's JSON parser may differ from
-the proxy's. The body must be valid UTF-8 JSON (only space, tab, CR and LF may
-surround it; a byte order mark or UTF-16 is refused) and a single object or a
-non-empty array of objects; otherwise the answer is 400 with `-32700 Parse
-error`. The structural keys `method`, `params` and `arguments` are matched
-exactly (case-sensitively), and a key in any message, or in the `params` of a
-`tools/call`, that is not exactly `method`, `params` or `arguments` but equals
-one under case folding (`METHOD`, `Params`, `paramſ`) is refused with `-32600
-Invalid Request`, in single messages and batch elements alike; a duplicate
-`method` or `params` in any message, a
-duplicate `arguments` in a `tools/call`, or a `method` that is not a string,
-gets 400 with `-32600 Invalid Request`. Argument names are
-matched case-insensitively. Methods other than `tools/call` pass once the body
-is well-formed. A request with a `Content-Encoding` other than `identity`
-cannot be inspected and gets 415. The body is read once into memory, within
-`limits.max_request_body`, and forwarded byte for byte; every in-flight POST
-holds its body in memory meanwhile (see the sizing note under
-[Proxy limits](#proxy-limits)). Logs carry the
-upstream and argument name, never values. Legitimate clients that authenticate
-with headers are unaffected. Names: at most 32, each non-empty, at most 128
-bytes, valid UTF-8, no leading or trailing whitespace, no control characters,
-unique case-insensitively.
+the proxy's. Unless a row says otherwise the answer is HTTP 400 with a JSON-RPC
+error whose `id` is null:
+
+| Body | Answer |
+|---|---|
+| Not valid UTF-8 JSON (only space, tab, CR and LF may surround it; a byte order mark or UTF-16 is refused), or not a single object or a non-empty array of objects | `-32700 Parse error` |
+| Duplicate `method` or `params` key in any message, duplicate `arguments` key in a `tools/call`, or a `method` that is not a string | `-32600 Invalid Request` |
+| A message-level key that equals `method` or `params` only under case folding (`METHOD`, `Params`, `paramſ`), or a key inside the `params` of a `tools/call` that equals `arguments` only under case folding (`Arguments`), in single messages and batch elements alike | `-32600 Invalid Request` |
+| Forbidden argument name | `-32602`, `id` as above |
+| `Content-Encoding` other than `identity` (cannot be inspected; without `forbidden_arguments` the header is not forwarded and the body reaches the upstream as is) | `415` |
+| Larger than `limits.max_request_body` | `413` |
+
+The structural keys `method`, `params` and `arguments` are matched exactly
+(case-sensitively), as strict parsers do; argument names are matched
+case-insensitively. Methods other than `tools/call` and messages without a
+`method` (responses) pass once the body is well-formed. The body is read once
+into memory, within `limits.max_request_body`, and forwarded byte for byte with
+an exact `Content-Length`; every in-flight POST holds its body in memory
+meanwhile (see the sizing note under [Proxy limits](#proxy-limits)). Refusals
+are logged at `info` with the upstream and, for a forbidden argument, its
+configured name, never values. Legitimate clients that authenticate with
+headers are unaffected. Names: at most 32, each non-empty, at most 128 bytes,
+valid UTF-8, no leading or trailing whitespace, no control characters, unique
+case-insensitively.
 
 [Proxy limits](#proxy-limits) bound the volume of abuse but do not replace an
 allow-list.
@@ -205,9 +214,11 @@ upstreams:
 ```
 
 The check sends these requests to the upstream `url` exactly as configured
-(path and query intact), each carrying the entered credential headers plus
-`Content-Type: application/json`, `Accept: application/json, text/event-stream`
-and a `User-Agent`:
+(path and query intact), each carrying the entered credential headers and a
+`User-Agent: tn-mcp-proxy/<version>` (the module version from the Go build
+info, or `dev`; it can differ from the output of `-version`); the POSTs also carry
+`Content-Type: application/json` and
+`Accept: application/json, text/event-stream`:
 
 1. `initialize` (protocol `2025-06-18`). A `2xx` with a JSON-RPC result is
    required. The `Mcp-Session-Id` response header, if any, and the negotiated
@@ -318,9 +329,11 @@ error text.
   through (saturation is not cached). A burst of tool errors from one token costs
   at most one session per minute, also during an upstream outage; a revocation
   can be noticed up to a minute after the upstream recovers. The `refresh_token`
-  grant consults the same cache and, while credentials are cached as rejected,
-  answers `invalid_grant` (no upstream call), so clients re-run authorization
-  instead of refreshing into another 401. The refusal is best-effort and
+  grant consults the same cache (one checker, shared by all upstreams and by the
+  token endpoint) and, while credentials are cached as rejected, answers
+  `invalid_grant` (no upstream call), so clients re-run authorization
+  instead of refreshing into another 401. The cache is only ever filled for
+  upstreams that set `recheck_on_tool_error`, so the refusal applies to those. The refusal is best-effort and
   bounded by the verdict TTL (60 s): once the verdict expires a refresh succeeds
   again, until the next tool error re-triggers the check.
 - **Compression.** For these `POST`s the outbound `Accept-Encoding` is narrowed
@@ -347,7 +360,10 @@ Rotation: prepend a new key to `token_keys` (or the keys file) so it becomes the
 encrypting key, keep the old key for decryption, and drop the old key once
 `oauth.refresh_token_ttl` has passed, when no token sealed with it remains valid.
 That is an upper bound: chains also end at `oauth.max_session_ttl` from the
-original login, so many end sooner (whichever limit comes first).
+original login, so many end sooner (whichever limit comes first). Dropping a key
+also invalidates the registered client ids sealed with it, so every user has to
+reconnect; the step-by-step procedure is in the
+[README](../README.md#key-rotation).
 
 Upgrade tradeoff: a legacy refresh token (issued before `oauth.max_session_ttl`
 existed), including a stolen one, gets a full fresh `max_session_ttl` window
@@ -370,7 +386,8 @@ only once it closes). Fields: `method`, `path`, `status`, `bytes` (response
 body size), `duration`, `remote`, `user_agent` and `proto`. A handler panic is
 logged with `panic=true` (or `aborted=true` for an aborted response) and then
 propagates as usual. At any other level the middleware does nothing beyond
-calling the handler.
+calling the handler. `/healthz` requests are not access-logged, so probes do not
+flood the log.
 
 Never recorded: the query string (OAuth codes and state travel there; only the
 URL path is logged), request or response headers (`Authorization`, `Cookie`,
@@ -378,6 +395,29 @@ URL path is logged), request or response headers (`Authorization`, `Cookie`,
 
 `remote` holds the client IP only, without a port, resolved as described in
 [Client IP](#client-ip); the rate limiter uses the same value.
+
+Events above `debug` that an operator may want to alert on (message text is
+the start of the record's `msg`; fields in parentheses):
+
+| Level | Event | Meaning |
+|---|---|---|
+| `info` | `starting` (`version`, `listen`, `public_url`, `upstreams` as `name=path`, `tls`), `stopped`, `shutting down` | Lifecycle |
+| `warn` | `allow_insecure_http is set: ...` | Plain http accepted for non-loopback URLs |
+| `warn` | `upstream has no allowed_values: ...` / `upstream has allowed_values but no forbidden_arguments: ...` (`upstream`) | Open-relay warnings, see [Restricting access](#restricting-access) |
+| `info` | `credentials rejected by upstream`, `authorize refused: credentials not in allowed_values`, `token credentials not in allowed_values` (`upstream`; `step`, `reason` for the first) | Refused logins and tokens |
+| `warn` | `credential check unavailable` (`upstream`, `step`, `reason`, `err`) | Authorize-time check without a verdict (fail closed) |
+| `warn` | `credential recheck unavailable`, `upstream rejected credentials`, `upstream rejected credentials (tool error, confirmed by re-check)` | Proxy-side re-check and upstream 401 |
+| `info` | `tool call with forbidden argument rejected` (`argument`), `request body refused: not inspectable` (`reason`), `compressed request body refused: ...` | `forbidden_arguments` refusals |
+| `warn` | `refresh token reuse detected; family revoked` (`client_id`, `family`: 8 hex characters of a SHA-256) | Refresh token replay |
+| `warn` | `global authorize ceiling reached; delaying new logins`, `proxy rate limit refused requests`, `proxy concurrency limit refused requests`, `refresh family cache full, ...` (counts, at most once a minute) | Limits hit |
+| `warn` | `oauth.rate_limit.authorize_global allows more live codes than half the code cache; ...` | Oversized configured ceiling, at startup |
+| `error` | `single-use cache full; rejecting requests`, `access token payload mismatch`, `... payload mismatch`, `sealing ...` | Fail-closed paths and server faults |
+| `info` | `shutdown signal received; send it again to force exit` | Graceful shutdown started |
+| `warn` | `graceful shutdown timed out, closing connections` (`error`) | In-flight requests outlived the 15 s shutdown |
+| `error` | `reload failed` (`hook`, `error`) | A SIGHUP reload hook failed |
+| `warn` | `token lacks required credential` (`header`, `upstream`) | Valid token missing a required credential header |
+| `warn` | `credential check failed` (`upstream`) | Authorize-time check failed with an unclassified error |
+| `info`/`warn` | `tls certificate loaded`, `tls certificate expires soon`, `tls certificate reload failed, ...`, `reloaded`, `reload requested, nothing to reload` | Built-in TLS and SIGHUP |
 
 ## Client IP
 
@@ -468,11 +508,14 @@ make new logins wait (429 with `Retry-After`) instead of filling the cache (only
 submissions that pass the credential checks count toward this);
 that clears as soon as the flood stops. Raise it only if you really expect
 more than that many logins per minute; a value above the derived one gives up
-the cache guarantee, and a warning is logged at startup when the configured
-value allows more than half the cache (`burst + per_minute * m` live codes). The
-derived default satisfies that bound for `code_ttl` up to about 17 days. `burst`
-needs `per_minute` to be set too. When the ceiling is hit it is logged once a minute at
-`warn` (`global authorize ceiling reached`, with a count of refused requests).
+the cache guarantee, and a warning is logged at startup when
+`max(burst, per_minute) + per_minute * m` exceeds half the cache (25 000 live
+codes). The derived default satisfies that bound for `code_ttl` up to about 17
+days. `burst` needs `per_minute` to be set too, and defaults to it. With
+`oauth.rate_limit.disabled` there is no ceiling; a full code cache then still
+fails closed with `503 server_error` at the token endpoint. When the ceiling is
+hit it is logged once a minute at `warn` (`global authorize ceiling reached`,
+with a count of refused requests).
 
 A limited request gets `429 Too Many Requests` with `Retry-After` (whole
 seconds, rounded up):
@@ -698,7 +741,7 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000" always;   # HSTS (the service sends it itself only with built-in TLS)
 
-    client_max_body_size 10m;           # the service rejects bodies over limits.max_request_body, 10 MiB by default (413)
+    client_max_body_size 10m;           # the service rejects bodies over limits.max_request_body, 10 MiB by default (413); raise both together
 
     # Proxy settings at server level are inherited by both locations below
     # (proxy_set_header only while a location defines no proxy_set_header of its own).

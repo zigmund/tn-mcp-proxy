@@ -121,7 +121,8 @@ type Config struct {
 	TLS       TLS         `yaml:"tls"`
 
 	// AllowInsecureHTTP lets public_url, allowed_redirect_uris and upstream
-	// URLs use plain http for non-loopback hosts. Off by default.
+	// URLs use plain http for non-loopback hosts (loopback hosts may always
+	// use http). Off by default.
 	AllowInsecureHTTP bool `yaml:"allow_insecure_http"`
 
 	// TrustedProxies lists the CIDRs (or bare IPs) of reverse proxies whose
@@ -180,6 +181,8 @@ type OAuth struct {
 // RateLimit configures the per-IP token-bucket limits of the OAuth endpoints.
 // Zero or unset values mean the defaults; negative values are errors.
 type RateLimit struct {
+	// Disabled switches off every limit below, the global authorize ceiling
+	// included.
 	Disabled  bool  `yaml:"disabled"`
 	Register  Limit `yaml:"register"`  // POST /oauth/register
 	Authorize Limit `yaml:"authorize"` // POST /oauth/authorize
@@ -225,9 +228,11 @@ type Upstream struct {
 	// Validate, when set, makes the authorize form verify the entered
 	// credentials against the upstream before a code is issued.
 	Validate *Validate `yaml:"validate"`
-	// ForbiddenArguments lists tool argument names (matched case-insensitively)
-	// that the proxy refuses in tools/call requests, so a token holder cannot
-	// pass credentials as tool arguments around the injected headers.
+	// ForbiddenArguments lists tool argument names that the proxy refuses in
+	// tools/call requests (top-level keys of params.arguments, matched
+	// case-insensitively), so a token holder cannot pass credentials as tool
+	// arguments around the injected headers. Setting it makes the proxy read
+	// and parse every POST body, and fail closed on bodies it cannot inspect.
 	ForbiddenArguments []string `yaml:"forbidden_arguments"`
 }
 

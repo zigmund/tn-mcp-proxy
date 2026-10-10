@@ -2,7 +2,54 @@
 
 ## Overview
 
-_To be written._
+tn-mcp-proxy is one Go binary (`cmd/tn-mcp-proxy`) that plays two roles on a
+single listener:
+
+- an OAuth 2.1 authorization server for claude.ai and ChatGPT custom connectors
+  (dynamic client registration, authorization code with PKCE S256, refresh
+  tokens), whose "login" is a form asking for the upstream credentials;
+- the protected resource: one reverse proxy per configured upstream MCP server,
+  which opens the bearer token, injects the credentials it carries as request
+  headers and streams the request through (SSE included).
+
+There is no database. Client ids, authorization codes, access tokens and refresh
+tokens are self-contained AES-256-GCM blobs (see [Token sealing](#token-sealing));
+the upstream credentials travel inside them. The only server-side state is
+in memory and bounded: the single-use caches of codes and refresh families, the
+rate limiters, the proxy limits and the re-check verdict cache. It is lost on
+restart, so run a single instance (see [Security considerations](#security-considerations)).
+
+How a request is routed (outermost first): built-in TLS and the HSTS header (only
+when `tls.*` is set) -> `/healthz` (answered directly, not access-logged) -> the
+10 s read deadline for `/oauth/*` and `/.well-known/*` -> the debug access log ->
+the mux:
+
+| Path | Methods | Served by |
+| --- | --- | --- |
+| `/healthz` | GET, HEAD | `200 ok`, no authentication |
+| `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration`, `/.well-known/oauth-protected-resource[<path>]` | GET, HEAD, OPTIONS | static metadata (`internal/oauth`) |
+| `/oauth/register` | POST, OPTIONS | dynamic client registration |
+| `/oauth/authorize` | GET, HEAD, POST | credentials form and code issuance |
+| `/oauth/token` | POST (other methods get 405) | code exchange and refresh |
+| `<upstream.path>` (exact match) | POST, GET, DELETE | the proxy (`internal/proxy`) |
+
+Packages under `internal/`:
+
+| Package | Role |
+| --- | --- |
+| `config` | YAML loading, defaults, validation, limits constants |
+| `seal`, `tokens` | token encryption and the payload types sealed into tokens |
+| `oauth` | metadata, registration, authorize form, token endpoint, OAuth rate limits, single-use caches |
+| `proxy` | per-upstream reverse proxy, forbidden-argument inspection, tool-error re-check, proxy limits |
+| `credcheck` | the `validate` MCP session, shared by the authorize form and the re-check |
+| `ratelimit` | keyed token buckets (with IPv6 tiers) and concurrency slots |
+| `httplog` | client IP resolution from `trusted_proxies`, debug access log |
+| `server` | handler tree, `http.Server` settings, HSTS, read deadline, signals |
+| `certreload` | built-in TLS certificate hot reload |
+| `logging` | `slog` setup from `log.*` |
+
+Operator-facing behavior and every config key are in
+[configuration.md](configuration.md); this document describes how the pieces work.
 
 ## OAuth flow
 
@@ -46,7 +93,10 @@ families (see Token endpoint).
 `GET /oauth/authorize` validates the request and renders the credentials form;
 `POST /oauth/authorize` turns the submitted form into an authorization code.
 Other methods get `405`. No CORS headers are set (the endpoint is only
-navigated to).
+navigated to). Both methods are rate limited per client IP, each with its own
+budget (`oauth.rate_limit.authorize_form` for GET, `authorize` for POST; a
+rendered form seals a request, so GET is throttled too); see
+[Cache filling](#security-considerations).
 
 **Validation and error policy.** The client is checked first: `client_id` must
 open as a `client` seal (`openClient`) and `redirect_uri` must exactly match
@@ -66,8 +116,10 @@ configured.
 
 **Allow-list.** If a credential has `allowed_values`, `POST /oauth/authorize`
 checks the collected values (`Upstream.CredsAllowed`: exact match after the
-form's trimming, constant-time per candidate) after the length checks and
-before the upstream validation call and before sealing. A mismatch re-renders
+form's trimming; each candidate is compared as a SHA-256 digest in constant
+time and the loop does not stop at the first match) after the length and token
+size checks and before the upstream validation call and before sealing. A
+mismatch re-renders
 the form with the same message as a rejected credential, and the upstream is
 never contacted for foreign keys. Status and message are identical, but the
 timing is not: a list refusal returns at once, while a listed key with a wrong
@@ -76,9 +128,10 @@ list exists and whether a candidate key is on it (the comparison itself is
 constant-time, and the secret is still required). The list gates token issuance
 only and is effective only together with `validate` (a config without it is
 rejected at load); request content is the business of `forbidden_arguments`,
-see Proxying. The same check runs in the `refresh_token` grant (`invalid_grant`) and in
+see Proxying. The same check runs in both token grants (`invalid_grant`) and in
 the proxy's `authenticate` (`401 invalid_token`); see Token endpoint and
-Proxying.
+Proxying. At startup the binary logs one warning per upstream without any list,
+and one per upstream with a list but without `forbidden_arguments`.
 
 **ChatGPT and RFC 9207.** ChatGPT uses the stable redirect URI
 `https://chatgpt.com/connector_platform_oauth_redirect` only with servers that
@@ -97,23 +150,42 @@ inputs). The page leads with the host the user returns to as the identity of the
 application ("<host> is requesting access to <upstream title>"), because
 the application name is attacker-controlled (open DCR; a homoglyph name can
 imitate a known client). The name is shown only as a secondary line labelled
-"self-declared, unverified", stripped of control characters and HTML-escaped. The validated request is sealed (`seal.KindAuthRequest`, 15 minute
-expiry) into a hidden `request` field. Responses carry `Cache-Control:
-no-store`, `X-Frame-Options: DENY` and a CSP with `default-src 'none'`, the
+"self-declared, unverified", stripped of control characters and HTML-escaped.
+The page also says the credentials are encrypted into the tokens issued to the
+application at that address, and to continue only if you started the connection
+yourself: an authorize URL can be forwarded to someone else (it has no expiry
+and is not bound to a browser), so a link could lead a user to hand their
+credentials to a connector they did not start. The validated request is sealed
+(`seal.KindAuthRequest`, 15 minute expiry from rendering, independent of
+`oauth.code_ttl`) into a hidden `request` field. Responses carry `Cache-Control:
+no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY` and a CSP with `default-src 'none'`, the
 single inline stylesheet allowed by hash (no inline script),
 `frame-ancestors 'none'`, `base-uri 'none'` and `form-action 'self'` plus the
 origin of the `redirect_uri` (Chrome applies `form-action` to the redirect
 that follows the POST, so the client's origin must be listed).
 
-**Submission.** The POST body is capped at 32 KiB. Only the sealed `request`
-and the `cred_N` fields are read; the client, redirect and upstream are
-re-validated against the current config, so a revoked redirect or removed
-upstream fails even for an already rendered form. Values are trimmed; a
-required one that is empty, longer than 4 KiB or containing control characters
-re-renders the form (`400`) with a message and without echoing secrets.
-If the upstream has `validate`, the credentials are then checked against it
-(see Credential validation below); only accepted credentials reach the code
-step. On success the proxy answers `303 See Other` to `redirect_uri?code=...&state=...&iss=...`
+**Submission.** The POST body is capped at 32 KiB (`413` page beyond), and a
+declared cross-site POST gets a `403` page. Only the sealed `request` and the
+`cred_N` fields are read; the client, redirect and upstream are re-validated
+against the current config, so a revoked redirect or removed upstream fails
+even for an already rendered form, and an invalid or expired sealed request is
+a `400` page. Values are trimmed; a required value that is empty, and any value
+(optional ones included) longer than 4 KiB, invalid UTF-8 or containing control
+characters, re-renders the form (`400`) with a message and without echoing secrets. The remaining steps run in
+this order, cheapest refusal first:
+
+1. the token size budget: the credentials must fit the worst-case code, access
+   and refresh token (`seal.MaxTokenSize`, 16 KiB encoded), else the form is
+   re-rendered (`400`, "The credentials together are too long.");
+2. the `allowed_values` allow-list (below), no upstream call;
+3. the upstream `validate` check (Credential validation below);
+4. the global authorize ceiling (see Cache filling): charged here, right before
+   the code is sealed, so only a submission that is about to get a code spends
+   it (`429` error page with `Retry-After` when empty);
+5. sealing and redirect.
+
+Only accepted credentials reach step 5. On success the proxy answers `303 See Other` to `redirect_uri?code=...&state=...&iss=...`
 (also for errors found at POST time, so the browser never re-sends the
 credentials; errors found at GET time use `302`). The AS metadata advertises
 `authorization_response_iss_parameter_supported: true` (RFC 9207).
@@ -124,7 +196,8 @@ With `validate` configured (internal/oauth/credcheck.go) `authorizeSubmit`
 makes one authenticated MCP exchange before issuing a code: `initialize`,
 `notifications/initialized`, then `tools/call` of the configured read-only
 tool, all with the entered credential headers, and a best-effort `DELETE` when
-the upstream issued a session. Classification: HTTP `401`/`403` at any step or
+the upstream issued a session (each POST carries `Accept: application/json,
+text/event-stream` and `User-Agent: tn-mcp-proxy/<version>`, the module version from the Go build info, or `dev`; it can differ from `-version`). Classification: HTTP `401`/`403` at any step or
 a tool result with `isError: true` means rejected (form re-rendered, `400`);
 everything else that is not a clean result (JSON-RPC error, non-2xx, `3xx`,
 transport error, timeout, malformed or over-1-MiB body, no response with the
@@ -134,7 +207,7 @@ would travel to the redirect target), the whole check is bounded by
 `validate.timeout` and the request context, and at most 16 checks run
 concurrently (waiting for a slot counts toward `validate.timeout`; the slot is
 released before the best-effort session `DELETE`, which may add up to 2 s to
-the response). The `503` carries `Retry-After`. The credentials, the URL path
+the response). The `503` carries `Retry-After: 30`. The credentials, the URL path
 and query, response bodies and upstream error text are never logged; the
 transport error may name the upstream host or IP. The price: one extra upstream round trip per submission, and
 the form becomes a credential-validity oracle for whoever can reach it, bounded
@@ -147,9 +220,10 @@ abuse: the only secret in the POST is the credentials the user types, and the
 resulting code goes to an allowlisted redirect whose client verifies its own
 `state`. The sealed field binds every request parameter (a forged or edited
 POST cannot change client, redirect, PKCE challenge or upstream) and expires.
-As defence in depth, a POST declared `Sec-Fetch-Site: cross-site` or
-`same-site` is refused (an absent header, as in older browsers, is allowed:
-this check is defence in depth only). Clickjacking is blocked by `frame-ancestors` and
+As defence in depth, a POST whose `Sec-Fetch-Site` is anything but
+`same-origin` or `none` (so `cross-site` and `same-site`) is refused with `403`
+(an absent header, as in older browsers, is allowed: this check is defence in
+depth only). Clickjacking is blocked by `frame-ancestors` and
 `X-Frame-Options`. Credentials are never logged.
 
 **Authorization code.** `seal.KindCode` with `tokens.Code`:
@@ -241,14 +315,23 @@ which one: `client_id` equals the code's client; `redirect_uri` equals the
 code's; the verifier is 43-128 characters of `[A-Za-z0-9-._~]` and
 `BASE64URL(SHA256(verifier))` equals the challenge (constant-time compare);
 the redirect URI is still registered for the client and still in
-`oauth.allowed_redirect_uris`; the upstream still exists in the config.
-Last, the code's jti is claimed in the cache. Validation comes first, so a
-request that fails (for example a wrong verifier) does not burn the code.
+`oauth.allowed_redirect_uris`; the upstream still exists in the config; the
+code's credentials still satisfy `allowed_values`. Last, the code's jti is
+claimed in the cache. Validation comes first, so a request that fails (for
+example a wrong verifier) does not burn the code, and a code minted under an
+older allow-list is not redeemed into tokens the proxy would refuse anyway.
 
 **`refresh_token`.** Requires `refresh_token`. It must open as
 `seal.KindRefresh`, be unexpired, belong to the presenting client and name an
-upstream that still exists (else `invalid_grant`). It is then redeemed against
-the family cache (see Single-use caches) before the new pair is issued.
+upstream that still exists, and its credentials must still satisfy
+`allowed_values` (else `invalid_grant`). Two more refusals are `invalid_grant`:
+the session cap (below), and a cached upstream rejection. The latter asks the
+proxy's shared `Rechecker` (the same verdict cache as the tool-error re-check,
+see Proxying) whether the credentials were recently found rejected by the
+upstream; it reads the cache only and never calls the upstream, and it has an
+effect only for upstreams with `validate.recheck_on_tool_error`. The token is
+then redeemed against the family cache (see Single-use caches) before the new
+pair is issued.
 
 **`resource` (RFC 8707).** Optional on both grants. When present it must equal
 the upstream's resource URI (`public_url` + upstream `path`, the mapping
@@ -258,8 +341,9 @@ upstream applies.
 **Issue.** Success returns `{access_token, token_type: "Bearer", expires_in,
 refresh_token}` (`scope` is omitted: scopes are unused). The access token is
 `seal.KindAccess` with `tokens.Access` (what the proxy opens, checking the
-upstream name), expiring after `oauth.access_token_ttl`; `expires_in` is that
-TTL in seconds. The refresh token is `seal.KindRefresh` with `tokens.Refresh`
+upstream name), expiring after `oauth.access_token_ttl` (at most 24 h) unless
+the session cap below is nearer; `expires_in` is the remaining lifetime in
+seconds. The refresh token is `seal.KindRefresh` with `tokens.Refresh`
 (`u`, `c`, `h`, family `f`, generation `g`, expiry `e`, login start `s`),
 expiring after `oauth.refresh_token_ttl`. Every refresh rotates the pair and
 restarts the refresh expiry (sliding expiry), but the chain has an absolute
@@ -268,7 +352,9 @@ rotation, and a refresh at or after `s + oauth.max_session_ttl` is an
 `invalid_grant`. Refresh expiry, access expiry (and so `expires_in`) are
 capped at that session end. A legacy refresh token without `s` (issued before
 the field existed) is migrated once: its first refresh treats that moment as
-the start, so the new chain is bounded from there on. The credentials travel
+the start, so the new chain is bounded from there on (a stolen legacy token
+therefore also gets a full window). A start more than 5 minutes in the future
+is refused as forged or corrupt. The credentials travel
 from the code into both tokens unchanged. Nothing is revoked server-side when
 a client disconnects; the chain simply runs out at the idle or absolute limit.
 
@@ -375,8 +461,10 @@ Independent security audits and their outcomes are indexed in [security/](securi
   (one code entry each, and one family entry once refreshed). The defences are a hierarchy of rate limits, a global
   ceiling on code issuance and the separate revocation set (above). Rate
   limits (internal/ratelimit, wired in internal/oauth/ratelimit.go) apply to
-  `POST /oauth/register`, `POST /oauth/authorize` and `POST /oauth/token`: one
-  token bucket per client IP and endpoint, answering 429 with `Retry-After`.
+  `POST /oauth/register`, `POST /oauth/authorize`, `POST /oauth/token` and, with
+  a much larger budget of its own, `GET /oauth/authorize` (rendering the form
+  seals a request): one token bucket per client IP and endpoint, answering 429
+  with `Retry-After`.
   IPv4 is keyed by address; IPv6 is charged against its `/64`, `/56` and `/48`
   (budgets 1x, 4x and 16x the per-`/64` default), all of which must allow the
   request, so rotating `/64`s inside a routed prefix gets the `/48` budget, not
@@ -404,7 +492,8 @@ Independent security audits and their outcomes are indexed in [security/](securi
   keys before any upstream call.
   Hitting the ceiling answers 429 with `Retry-After` (the same error page as the
   per-IP limit; the per-IP token stays spent) and logs at warn (at most once a
-  minute).
+  minute). `oauth.rate_limit.disabled` switches off the ceiling together with
+  the per-IP limits; a full code cache then still fails closed (503).
 
   Costs with the defaults (attacker's side; every family needs one login, one
   token exchange and one refresh, so authorize is the binding limit):
@@ -462,21 +551,39 @@ upstreams (Tradernet among them) accept credentials as tool arguments, which
 would bypass the credentials injected as headers. With `forbidden_arguments`
 set, `inspectToolArguments` (`internal/proxy/toolargs.go`) reads a POST body
 once, within the body cap, after the limits have admitted the request. It
-walks a single JSON-RPC message or a batch token by token (no struct decoding)
-and rejects the whole request with 400 and a JSON-RPC error (-32602) when a
-`tools/call` has a `params.arguments` key matching a forbidden name
-(case-insensitive, even with a null value). It fails closed, since the upstream
-parser may differ from Go's: a body that is not valid UTF-8 JSON, or not an
-object or non-empty array of objects, gets -32700; a duplicate `method` or
-`params` key in any message, a duplicate `arguments` key in a `tools/call`
-(keys matched exactly, as strict parsers do), a non-string `method`, or a key
-of any message, or of a `tools/call`'s `params`, that equals `method`, `params`
-or `arguments` only under case folding (`METHOD`, `paramſ`) gets -32600. A
-body with a `Content-Encoding` other than
-`identity` cannot be inspected and gets 415. Well-formed messages with other
-methods pass. Because the body is held in memory, each in-flight POST costs up
-to `limits.max_request_body`. Allowed bodies are forwarded as the same bytes with an exact
-`Content-Length`. Log lines name the upstream and the argument, never values.
+walks the members of a single JSON-RPC message, or of each element of a batch,
+with `json.Decoder` tokens (no map or struct decoding, so duplicate keys stay
+visible) and rejects the whole request with HTTP 400 and a JSON-RPC error body
+(`{"jsonrpc":"2.0","id":...,"error":{"code":...,"message":...}}`) when a
+`tools/call` has a top-level `params.arguments` key matching a forbidden name
+(case-insensitive, even with a null value): code -32602, message `argument not
+allowed: <configured name>`. The `id` is echoed only for a single message
+whose id is a string, number or null; it is null for a batch and for every
+other rejection. It fails closed, since the upstream parser may differ from
+Go's:
+
+- a body that is not valid UTF-8 JSON (a byte order mark or UTF-16 is refused;
+  only space, tab, CR and LF may surround it), or not an object or a non-empty
+  array of objects, gets -32700 `Parse error`;
+- a duplicate `method` or `params` key in any message, a duplicate `arguments`
+  key in a `tools/call` (keys are matched exactly, as strict parsers do), or a
+  non-string `method` gets -32600 `Invalid Request`;
+- a message-level key that equals `method` or `params` only under case folding
+  (`METHOD`, `paramſ`), or a key inside a `tools/call`'s `params` that equals
+  `arguments` only under case folding (`Arguments`), also gets -32600: a
+  case-insensitive parser would read it as the structural key, so it is refused
+  instead of ignored;
+- a body with a `Content-Encoding` other than `identity` cannot be inspected
+  and gets `415`;
+- a body over the cap gets `413`.
+
+Well-formed messages with other methods, and messages without a `method` (JSON-RPC
+responses), pass. Only POST bodies are inspected. Because the body is held in
+memory, each in-flight POST costs up to `limits.max_request_body` (see the
+sizing note in configuration.md). Allowed bodies are forwarded as the same
+bytes with an exact `Content-Length` (a chunked body becomes a fixed-length
+one; the content is unchanged). Refusals are logged at `info` with the upstream
+and, for a forbidden argument, its configured name, never values.
 
 **Limits.** One shared `proxy.Limits` (`limits` config section) guards all
 upstream handlers. Per request: per-IP token bucket (before the token is
@@ -516,7 +623,10 @@ forwards only what MCP needs, so a token holder cannot steer the upstream, or
 make it reflect or misuse the injected credentials, with arbitrary headers.
 `Origin` is forwarded because MCP servers validate it and that decision
 belongs to the upstream. `Content-Length` and `Transfer-Encoding` are derived
-by net/http from the request. A client that sends no `User-Agent` gets none
+by net/http from the request. `Content-Encoding` is not forwarded and
+compressed request bodies are not supported: with `forbidden_arguments` they are
+refused with 415; without it the body reaches the upstream with no encoding
+header. A client that sends no `User-Agent` gets none
 upstream (Go's default is not substituted). Then the token's credentials are
 set, after `ReverseProxy` removes hop-by-hop headers (including any header
 named in `Connection:`, even an allow-listed one), so a `Connection:` header
@@ -623,10 +733,13 @@ errors, timeouts, 5xx and JSON-RPC errors are "unavailable" and never cause a
 | Status | When | `WWW-Authenticate` |
 |--------|------|--------------------|
 | 400 | `Upgrade` header present | none |
+| 400 | `forbidden_arguments` inspection refused the body (JSON-RPC error body: -32602, -32600 or -32700) | none |
 | 401 | no Bearer token | `Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource<path>"` |
-| 401 | invalid, expired, wrong kind, wrong upstream, bad payload, missing credentials, upstream 401, or a tool error confirmed by the credential re-check (`validate.recheck_on_tool_error`) | `Bearer error="invalid_token", error_description="...", resource_metadata="..."` |
+| 401 | invalid, expired, wrong kind, wrong upstream, bad payload, missing credentials, credentials no longer in `allowed_values`, upstream 401, or a tool error confirmed by the credential re-check (`validate.recheck_on_tool_error`) | `Bearer error="invalid_token", error_description="...", resource_metadata="..."` |
 | 404 | path is not exactly `path` | none |
+| 405 | method other than POST, GET, DELETE; `Allow: GET, POST, DELETE` | none |
 | 413 | request body over `limits.max_request_body` (10 MiB by default) | none |
+| 415 | `forbidden_arguments` set and the body has a `Content-Encoding` other than `identity` | none |
 | 429 | per-IP or per-grant rate limit, or per-grant concurrency limit; `Retry-After` set | none |
 | 503 | global in-flight cap reached; `Retry-After: 1` | none |
 | 500 | the sealer itself is broken (server bug) | none |
@@ -706,10 +819,13 @@ intentionally no `ReadTimeout`/`WriteTimeout`: they are absolute deadlines and
 would cut SSE streams and slow tool calls. OAuth and `/.well-known/*` requests,
 which never stream, get a per-request read deadline of 10s instead
 (`http.ResponseController.SetReadDeadline`; slow-body protection), and with
-built-in TLS every response carries `Strict-Transport-Security`. `net/http` server errors go to the
-slog logger at `warn`.
+built-in TLS every response carries `Strict-Transport-Security: max-age=31536000`
+(replacing any value an upstream sent). `net/http` server errors go to the
+slog logger at `warn`, except TLS handshake failures, which anyone who can open a
+TCP connection can trigger and which are logged at `debug`.
 
-Signals: `SIGINT`/`SIGTERM` start a graceful shutdown (15s). Streams that
+Signals: `SIGINT`/`SIGTERM` start a graceful shutdown (15s); a second one
+during the shutdown ends the process at once. Streams that
 outlive the timeout are closed forcibly and the process still exits 0.
 `SIGHUP` never terminates the process; it runs the registered reload hooks
 (`Server.OnReload`) or logs `reload requested, nothing to reload`. A listen

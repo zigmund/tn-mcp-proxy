@@ -35,8 +35,9 @@ type ProxyLimits struct {
 
 	// IP is the per-client-IP token bucket, applied before the token is opened.
 	IP Limit `yaml:"ip"`
-	// Token is the per-grant token bucket (a grant is one set of upstream
-	// credentials, shared by all OAuth clients; refreshing does not change it).
+	// Token is the per-grant token bucket (a grant is one set of required
+	// upstream credentials, shared by all OAuth clients; refreshing does not
+	// change it, and optional credentials are not part of it).
 	Token Limit `yaml:"token"`
 	// MaxConcurrentPerToken caps in-flight requests per grant, an open SSE
 	// stream counting as one until it ends.

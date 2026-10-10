@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -752,5 +753,159 @@ func TestBearerWithEmbeddedSpaceIs401(t *testing.T) {
 	}
 	if n := len(e.requests()); n != 0 {
 		t.Errorf("%d requests reached the upstream", n)
+	}
+}
+
+func TestDisallowedMethodsAre405(t *testing.T) {
+	for _, method := range []string{"HEAD", "OPTIONS", "PUT", "PATCH", "TRACE", "CONNECT", "PROPFIND", "FOO"} {
+		for _, withToken := range []bool{true, false} {
+			name := method + "/anon"
+			if withToken {
+				name = method + "/token"
+			}
+			t.Run(name, func(t *testing.T) {
+				e := newEnv(t, nil)
+				auth := ""
+				if withToken {
+					auth = "Bearer " + e.access(t, goodCreds())
+				}
+				resp := e.do(t, method, "/mcp/tn", auth, nil, "")
+				if resp.StatusCode != http.StatusMethodNotAllowed {
+					t.Fatalf("status %d", resp.StatusCode)
+				}
+				if got := resp.Header.Get("Allow"); got != "GET, POST, DELETE" {
+					t.Errorf("Allow %q", got)
+				}
+				if resp.Header.Get("WWW-Authenticate") != "" {
+					t.Error("405 must not carry a challenge")
+				}
+				if n := len(e.requests()); n != 0 {
+					t.Errorf("upstream contacted %d times", n)
+				}
+			})
+		}
+	}
+}
+
+func TestDisallowedMethodAfterPathCheck(t *testing.T) {
+	e := newEnv(t, nil)
+	if resp := e.do(t, "PUT", "/mcp/tn/x", "", nil, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status %d, want 404 for wrong path", resp.StatusCode)
+	}
+}
+
+func TestOnlyAllowListedHeadersForwarded(t *testing.T) {
+	spoofed := map[string]string{
+		"CF-Connecting-IP": "203.0.113.7", "True-Client-IP": "203.0.113.7", "X-Client-IP": "203.0.113.7",
+		"X-Original-URL": "/admin", "X-Rewrite-URL": "/admin", "X-HTTP-Method-Override": "DELETE",
+		"X-Forwarded-Host": "evil.example", "X-Forwarded-For": "203.0.113.7", "Forwarded": "for=203.0.113.7",
+		"Cookie": "s=1", "X-Foo": "bar", "Referer": "https://evil.example/",
+		"X-TN-API-Key": "attacker", "X-TN-API-Secret": "attacker", "X-TN-SID": "attacker",
+	}
+	intact := map[string]string{
+		"Mcp-Session-Id": "sess-1", "Mcp-Protocol-Version": "2025-06-18", "Last-Event-ID": "42",
+		"Accept": "application/json, text/event-stream", "Accept-Encoding": "gzip",
+		"Content-Type": "application/json", "User-Agent": "test-client/1.0", "Origin": "https://claude.ai",
+	}
+	injected := map[string][]string{
+		"X-Tn-Api-Key": {"key-123"}, "X-Tn-Api-Secret": {"secret-456"}, "X-Tn-Sid": {"sid-789"},
+		"Content-Length": {"2"}, // set by net/http
+	}
+	tests := []struct {
+		name  string
+		extra map[string]string   // added to the request on top of spoofed+intact
+		multi map[string][]string // additional values, replacing the single-valued header
+		want  map[string][]string // expected differences from the base expectation
+		gone  []string            // must be absent upstream
+	}{
+		{name: "base"},
+		{
+			name:  "connection names allow-listed headers",
+			extra: map[string]string{"Connection": "Origin, Mcp-Session-Id"},
+			gone:  []string{"Origin", "Mcp-Session-Id", "Connection"},
+		},
+		{
+			name:  "te trailers",
+			extra: map[string]string{"Te": "trailers"},
+			gone:  []string{"Te"},
+		},
+		{
+			name:  "multi-value and comma values",
+			multi: map[string][]string{"Accept": {"a,b", "c"}},
+			want:  map[string][]string{"Accept": {"a,b", "c"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			req, err := http.NewRequest("POST", e.proxy.URL+"/mcp/tn", strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+e.access(t, goodCreds()))
+			for _, m := range []map[string]string{spoofed, intact, tt.extra} {
+				for k, v := range m {
+					req.Header.Set(k, v)
+				}
+			}
+			for k, vs := range tt.multi {
+				req.Header.Del(k)
+				for _, v := range vs {
+					req.Header.Add(k, v)
+				}
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != 200 {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			got := e.requests()[0].header
+
+			want := map[string][]string{}
+			for k, v := range intact {
+				want[http.CanonicalHeaderKey(k)] = []string{v}
+			}
+			for k, v := range injected {
+				want[k] = v
+			}
+			for k, v := range tt.want {
+				want[k] = v
+			}
+			for _, k := range tt.gone {
+				delete(want, k)
+			}
+			for k, v := range want {
+				if !slices.Equal(got.Values(k), v) {
+					t.Errorf("header %s = %q, want %q", k, got.Values(k), v)
+				}
+			}
+			for k := range got {
+				if _, ok := want[k]; !ok {
+					t.Errorf("unexpected header %s: %q", k, got.Values(k))
+				}
+			}
+		})
+	}
+}
+
+func TestNoUserAgentStaysEmpty(t *testing.T) {
+	e := newEnv(t, nil)
+	tok := e.access(t, goodCreds())
+	req, err := http.NewRequest("POST", e.proxy.URL+"/mcp/tn", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("User-Agent", "") // suppress Go's default on the client side
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if ua := e.requests()[0].header.Values("User-Agent"); len(ua) != 0 {
+		t.Errorf("User-Agent substituted: %q", ua)
 	}
 }

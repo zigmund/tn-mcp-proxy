@@ -334,8 +334,12 @@ the upstream. A request with an `Upgrade` header gets 400. Otherwise the
 request is authenticated and then sent by `httputil.ReverseProxy` to the
 upstream `url` exactly, with its path and escaping untouched. The client's
 query string is forwarded only if the upstream `url` has no query of its own;
-otherwise the configured query is used as is. Any method passes through (POST,
-GET for the SSE stream, DELETE for session end). The request body is capped at
+otherwise the configured query is used as is. Only the MCP Streamable HTTP
+methods are relayed: POST (messages), GET (SSE stream) and DELETE (session
+end). Any other method (HEAD, OPTIONS, PUT, PATCH, TRACE, ...) gets 405 with
+`Allow: GET, POST, DELETE`, decided before authentication, so no token is
+parsed and the upstream is never contacted. OPTIONS is included: MCP clients do
+not use browser CORS preflight for this endpoint. The request body is capped at
 10 MiB (413 beyond that).
 
 **Auth.** `Authorization: Bearer <token>` (scheme case-insensitive) is opened
@@ -347,16 +351,25 @@ extras in the token are ignored. A payload that does not decode (for example
 after a deploy changed its shape) is logged at error level and answered like
 any invalid token, so the client re-authorizes.
 
-**Header handling.** `Authorization`, `Cookie`, `Proxy-Authorization`,
-`X-Real-IP`, all `X-Forwarded-*` and `Forwarded` are stripped from the inbound
-request, as is every configured credential header (including optional ones),
-and then the token's credentials are set. Credentials are applied after
-`ReverseProxy` removes hop-by-hop headers, so a `Connection:` header cannot
-drop them. Client IPs are never forwarded (`SetXForwarded` is not used).
-`Host` is the upstream host. Everything else passes through, notably
-`Mcp-Session-Id`, `Mcp-Protocol-Version`, `Accept`, `Content-Type`,
-`Last-Event-ID`, `Origin` and `Referer`. `Set-Cookie` is stripped from
-responses.
+**Header handling.** Request headers are filtered with an allow-list
+(`forwardedHeaders` in `internal/proxy/proxy.go`): `Accept`, `Accept-Encoding`,
+`Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`,
+`User-Agent` and `Origin`. Everything else is dropped, including
+`Authorization`, `Cookie`, `Proxy-Authorization`, `Forwarded`, `X-Forwarded-*`,
+`X-Real-IP`, other client-IP headers, URL or method override headers and any
+configured credential header the client sent (optional ones too). The proxy
+forwards only what MCP needs, so a token holder cannot steer the upstream, or
+make it reflect or misuse the injected credentials, with arbitrary headers.
+`Origin` is forwarded because MCP servers validate it and that decision
+belongs to the upstream. `Content-Length` and `Transfer-Encoding` are derived
+by net/http from the request. A client that sends no `User-Agent` gets none
+upstream (Go's default is not substituted). Then the token's credentials are
+set, after `ReverseProxy` removes hop-by-hop headers (including any header
+named in `Connection:`, even an allow-listed one), so a `Connection:` header
+cannot drop them. No client-supplied address header is forwarded and
+the proxy adds none (`SetXForwarded` is not used), so the upstream sees the
+proxy as the client. `Host` is the upstream host. `Set-Cookie` is stripped
+from responses.
 
 **Streaming and timeouts.** `FlushInterval: -1` flushes every write, so SSE
 events reach the client immediately. The upstream transport has no overall

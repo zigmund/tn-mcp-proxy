@@ -21,6 +21,8 @@ secrets:
   # one base64 key per line; '#' comments and blank lines are ignored.
   # Relative paths are resolved against this config file's directory.
   # token_keys_file: /etc/tn-mcp-proxy/keys
+  # Under the bundled systemd unit (LoadCredential=keys:...) use:
+  # token_keys_file: /run/credentials/tn-mcp-proxy.service/keys
 
 # Durations: 0 or unset means the default; negative values are rejected.
 oauth:

@@ -52,6 +52,17 @@ in logs, `fmt`, JSON and YAML output.
 
 ### Upstream
 
+> [!CAUTION]
+> Credentials without `allowed_values` make a public deployment an open relay:
+> anyone with valid Tradernet credentials, stolen or their own, can obtain a
+> token and act through your server. Every upstream request leaves from this
+> server's IP and the upstream tools can trade on the account (place and cancel
+> orders) and read the portfolio and balances, so in a broker, exchange or police
+> inquiry the activity points to you, the operator. Set `allowed_values` on the non-secret credential
+> (for example `X-TN-API-Key`) or keep the server private. Startup logs a
+> warning for each upstream without an allow-list. See
+> [Restricting access](#restricting-access).
+
 | Field | Default | Rules |
 |---|---|---|
 | `name` | required | Unique, `[a-z0-9-]+` |
@@ -113,6 +124,9 @@ exists), before any upstream call and before anything is sealed; the
 `401 invalid_token`. So removing a value from the list and restarting cuts off tokens already issued for it.
 
 Without any list on an upstream, startup logs one warning for that upstream.
+
+[Proxy limits](#proxy-limits) bound the volume of abuse but do not replace an
+allow-list.
 
 ## Credential validation
 

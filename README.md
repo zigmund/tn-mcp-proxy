@@ -8,16 +8,39 @@ sits between the two: it presents a standard OAuth authorization server to
 claude.ai or ChatGPT and forwards MCP traffic to the upstream with the user's
 headers attached.
 
+tn-mcp-proxy does not implement the Tradernet API itself: it fronts Tradernet's
+own [MCP server](https://tradernet.com/tradernet-api/mcp) and forwards MCP
+traffic to it with the user's credential headers attached.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
+  <img alt="Flow: you enter Tradernet keys on the proxy's page; it seals them into a token your AI client holds and unseals it on each call." src="docs/images/flow-light.svg">
+</picture>
+
 ## How it works
 
-1. claude.ai discovers the OAuth endpoints (`/.well-known/*`), registers itself
-   (dynamic client registration) and sends the user to `/oauth/authorize`.
+1. claude.ai or ChatGPT discovers the OAuth endpoints (`/.well-known/*`),
+   registers itself (dynamic client registration) and sends the user to
+   `/oauth/authorize`.
 2. The user types their Tradernet credentials into a form served by the proxy.
 3. The proxy encrypts the credentials into the access and refresh tokens it
    issues (AES-256-GCM, keys from your config). There is no database or persistent
    state; only bounded in-memory replay caches.
-4. On each MCP request claude.ai sends the token; the proxy opens it, sets the
-   credential headers and streams the request to the upstream (SSE supported).
+4. On each MCP request the AI client sends the token; the proxy opens it, sets
+   the credential headers and streams the request to the upstream (SSE supported).
+
+Who sees what:
+
+| | Plain API keys | Sealed token |
+| --- | --- | --- |
+| You | type them once on the proxy's page | - |
+| claude.ai / ChatGPT | never | stores it, cannot decrypt it |
+| tn-mcp-proxy | in memory, per request; never stored or logged | opens it with keys from your config |
+| Tradernet MCP | in the `X-TN-*` headers, as with a direct call | - |
+
+The token is a bearer secret: whoever holds it can use it until it expires.
+A TLS-terminating reverse proxy in front of tn-mcp-proxy also sees the plain
+keys while you submit the authorization form.
 
 See [docs/architecture.md](docs/architecture.md) for the details.
 
@@ -123,6 +146,15 @@ certificate hot reload (see [Built-in TLS](docs/configuration.md#built-in-tls)).
 nginx snippet (no buffering, long timeouts, `X-Forwarded-For` overwrite, optional
 extra rate limit for `/oauth/`) is in [docs/configuration.md](docs/configuration.md#reverse-proxy).
 `GET /healthz` returns 200 and is meant for local checks.
+
+## Get Tradernet API keys
+
+Log in to Tradernet and generate an API key pair at
+<https://tradernet.com/tradernet-api/auth-api>. You will enter the API key and
+API secret (and optionally a SID) on the proxy's authorization page when you
+connect. The proxy does not store them (they live only inside the sealed token
+your AI client holds), but they do pass through the proxy process, so run the
+proxy yourself or use one whose operator you trust.
 
 ## Connect claude.ai
 

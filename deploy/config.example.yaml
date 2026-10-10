@@ -54,6 +54,29 @@ oauth:
   #   notice:
   #     en: |
   #       Free, as is, no guarantees.
+  #     ru: |
+  #       Бесплатно, как есть, без гарантий.
+  #   # Optional terms of use the user must accept (a required checkbox) before
+  #   # the Authorize button works. version (at most 32 characters) is shown on
+  #   # the page and written to the audit log. text: language -> plain-text file
+  #   # (at most 32 KiB, UTF-8, read at startup; relative paths are resolved
+  #   # against this file); "en" is required. url: optional language -> https://
+  #   # link to the full text, shown as "Full text". The files in deploy/ are
+  #   # samples, not legal advice; the Kazakh texts need native review.
+  #   terms:
+  #     version: "2026-10-10"
+  #     text:
+  #       en: /etc/tn-mcp-proxy/terms.en.txt
+  #       ru: /etc/tn-mcp-proxy/terms.ru.txt
+  #       kk: /etc/tn-mcp-proxy/terms.kk.txt
+  #     url:
+  #       en: https://example.org/terms
+
+  # The authorize page is available in English (the default and the fallback),
+  # Russian and Kazakh. The language comes from ?lang=, else the browser's
+  # Accept-Language, else English. Your own texts (notice, terms, credential
+  # labels, audit retention) are shown in the user's language when you provide
+  # it, else in English.
 
   # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
   # /oauth/token, and of GET /oauth/authorize (429 + Retry-After). Zero or unset
@@ -98,8 +121,12 @@ oauth:
 # audit:
 #   enabled: true
 #   retention: "12 months"
+#   retention_i18n: { en: "12 months", ru: "12 месяцев", kk: "12 ай" }  # optional; en required and equal to retention
 # With it, also set "audit: true" on the identifying credential below:
 #   - { header: X-TN-API-Key, label: API key, audit: true }
+# A credential may carry per-language labels next to "label" (en required and
+# equal to label, or label omitted):
+#   - { header: X-TN-API-Key, label: API key, labels: { en: API key, ru: Ключ API } }
 
 upstreams:
   - name: tn                       # [a-z0-9-]+, unique

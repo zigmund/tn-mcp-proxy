@@ -1,6 +1,11 @@
 package oauth
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/zigmund/tn-mcp-proxy/internal/config"
+)
 
 // defaultLang is the language of the message catalog that is always complete;
 // every other language falls back to it per message.
@@ -27,6 +32,7 @@ const (
 	msgCredsTooLong    = "cred.together_too_long"
 	msgCredsRejected   = "cred.rejected"
 	msgCredsNoVerdict  = "cred.unavailable"
+	msgTermsRequired   = "terms.error"
 )
 
 // catalog holds the page text: language code -> message id -> text. A text is
@@ -35,10 +41,21 @@ const (
 // text: html/template escapes it where it is rendered, so an argument (host,
 // title, retention, label) can never inject markup. Never put HTML in a text.
 //
-// To add a language, add an entry under its lowercase code with any subset of
-// the ids below; a missing id falls back to defaultLang.
+// To add a language, add an entry under its lowercase code and list it in
+// pageLangs; a missing id falls back to defaultLang, but a test requires the
+// built-in languages (ru, kk) to cover every id.
 var catalog = map[string]map[string]string{
+	"ru": catalogRU,
+	"kk": catalogKK,
 	defaultLang: {
+		"lang.nav_label": "Language",
+
+		"terms.summary":      "Terms of use (version %[1]s)",
+		"terms.region_label": "Terms of use text",
+		"terms.full_text":    "Full text",
+		"terms.accept":       "I have read and accept the terms of use",
+		msgTermsRequired:     "Accept the terms of use to continue.",
+
 		"page.title":        "Connect %[1]s",
 		"page.request_tail": "is requesting access to %[1]s",
 
@@ -133,4 +150,29 @@ func (l locale) Msg(m message) string {
 		return ""
 	}
 	return l.T(m.ID, m.Args...)
+}
+
+// slot is a message with one operator-supplied argument (a label, a retention
+// text) that may be written in another language than the page, in which case
+// the template wraps the argument in a lang attribute. Lang is empty when the
+// argument is in the page language, and Text is then the whole sentence.
+type slot struct {
+	Text               string
+	Before, Arg, After string
+	Lang               string
+}
+
+// Slot renders id with arg as its only argument, split around the argument
+// when arg is in another language than the page.
+func (l locale) Slot(id string, arg config.LangText) slot {
+	if arg.Lang == l.lang || arg.Lang == "" {
+		return slot{Text: l.T(id, arg.Text)}
+	}
+	const marker = "\x00"
+	text := l.T(id, marker)
+	before, after, _ := strings.Cut(text, marker)
+	if strings.Count(l.T(id), "%[1]s") != 1 {
+		return slot{Text: l.T(id, arg.Text)} // a translation must use the argument once
+	}
+	return slot{Before: before, Arg: arg.Text, After: after, Lang: arg.Lang}
 }

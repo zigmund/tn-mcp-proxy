@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"slices"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -36,6 +34,8 @@ type Page struct {
 	// Notice maps a lowercase language code (2 or 3 letters) to plain text;
 	// paragraphs are separated by blank lines. It must have an "en" entry.
 	Notice map[string]string `yaml:"notice"`
+	// Terms is the optional user agreement the user must accept to continue.
+	Terms *Terms `yaml:"terms"`
 }
 
 // validate checks p. Errors are prefixed with the field name and never echo
@@ -47,29 +47,10 @@ func (p Page) validate() []error {
 			errs = append(errs, fmt.Errorf("oauth.page.contact: %w", err))
 		}
 	}
-	if len(p.Notice) > MaxPageNoticeLangs {
-		errs = append(errs, fmt.Errorf("oauth.page.notice: more than %d languages", MaxPageNoticeLangs))
-	}
-	if _, ok := p.Notice[DefaultNoticeLang]; len(p.Notice) > 0 && !ok {
-		errs = append(errs, fmt.Errorf("oauth.page.notice.%s: required when oauth.page.notice is set", DefaultNoticeLang))
-	}
-	for _, lang := range p.noticeLangs() {
-		field := "oauth.page.notice." + lang
-		text := p.Notice[lang]
-		switch {
-		case !noticeLangRe.MatchString(lang):
-			// The key is not echoed: it is unbounded operator input.
-			errs = append(errs, errors.New("oauth.page.notice: every key must be a lowercase language code of 2 or 3 letters"))
-		case strings.TrimSpace(text) == "":
-			errs = append(errs, fmt.Errorf("%s: must not be empty", field))
-		case len(text) > MaxPageNoticeLen:
-			errs = append(errs, fmt.Errorf("%s: longer than %d bytes", field, MaxPageNoticeLen))
-		case !utf8.ValidString(text) || strings.ContainsFunc(text, func(r rune) bool {
-			return (unicode.IsControl(r) && r != '\n' && r != '\t') || unicode.Is(unicode.Cf, r)
-		}):
-			errs = append(errs, fmt.Errorf("%s: must be valid UTF-8 text without control or format characters (newline and tab are allowed)", field))
-		}
-	}
+	errs = append(errs, checkLangMap(langTextRules{
+		Field: "oauth.page.notice", MaxLen: MaxPageNoticeLen, Multiline: true,
+	}, p.Notice)...)
+	errs = append(errs, p.Terms.validate()...)
 	return errs
 }
 
@@ -104,17 +85,7 @@ func (p *Page) normalize() {
 	for lang, text := range p.Notice {
 		p.Notice[lang] = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
 	}
-}
-
-// noticeLangs returns the notice language codes in sorted order, the
-// deterministic order every accessor uses (a YAML mapping has no meaningful one).
-func (p Page) noticeLangs() []string {
-	langs := make([]string, 0, len(p.Notice))
-	for l := range p.Notice {
-		langs = append(langs, l)
-	}
-	sort.Strings(langs)
-	return langs
+	p.Terms.normalize()
 }
 
 // NoticeFor returns the notice text for lang, falling back to DefaultNoticeLang
@@ -132,15 +103,11 @@ func (p Page) NoticeFor(lang string) string {
 
 // NoticeParagraphs is NoticeFor split into paragraphs on blank lines, each
 // trimmed, empty ones dropped.
-func (p Page) NoticeParagraphs(lang string) []string {
-	var out []string
-	for _, para := range blankLineRe.Split(p.NoticeFor(lang), -1) {
-		if para = strings.TrimSpace(para); para != "" {
-			out = append(out, para)
-		}
-	}
-	return slices.Clip(out)
-}
+func (p Page) NoticeParagraphs(lang string) []string { return splitParagraphs(p.NoticeFor(lang)) }
+
+// NoticeIn is the notice for lang with the language it is written in: the
+// requested one, else "en". The text is empty when no notice is configured.
+func (p Page) NoticeIn(lang string) LangText { return lookupLang(p.Notice, lang) }
 
 var blankLineRe = regexp.MustCompile(`\n[ \t]*\n`)
 

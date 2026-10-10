@@ -133,7 +133,7 @@ func TestNeverLoggedLabels(t *testing.T) {
 		{Header: "X-B", Secret: true},
 		{Header: "X-C", Label: "SID", Optional: true},
 	}}
-	if got, want := u.NeverLoggedLabels(), []string{"X-B", "SID"}; !reflect.DeepEqual(got, want) {
+	if got, want := labelTexts(u.NeverLoggedLabels("en")), []string{"X-B", "SID"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("NeverLoggedLabels = %q, want %q", got, want)
 	}
 }

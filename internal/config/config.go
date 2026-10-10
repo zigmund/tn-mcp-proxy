@@ -146,8 +146,21 @@ type Log struct {
 // for the log files, which log rotation applies.
 type Audit struct {
 	Enabled bool `yaml:"enabled"`
-	// Retention is short free text such as "12 months". Required when Enabled.
+	// Retention is short free text such as "12 months", in the default
+	// language (en). Required when Enabled, unless retention_i18n has "en".
 	Retention string `yaml:"retention"`
+	// RetentionI18n optionally maps a language code to the retention text for
+	// that language. It must have an "en" entry, which equals Retention (and
+	// stands in for it when Retention is omitted).
+	RetentionI18n map[string]string `yaml:"retention_i18n"`
+}
+
+// RetentionIn is the retention text for lang: the requested language, else en.
+func (a Audit) RetentionIn(lang string) LangText {
+	if t, ok := a.RetentionI18n[lang]; ok {
+		return LangText{Text: t, Lang: lang}
+	}
+	return LangText{Text: a.Retention, Lang: DefaultNoticeLang}
 }
 
 // MaxAuditRetentionLen is the longest audit.retention, in characters.
@@ -163,6 +176,12 @@ func (a Audit) validate() []error {
 		errs = append(errs, fmt.Errorf("audit.retention: longer than %d characters", MaxAuditRetentionLen))
 	case strings.IndexFunc(a.Retention, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 || !utf8.ValidString(a.Retention):
 		errs = append(errs, errors.New("audit.retention: must be printable text without control characters"))
+	}
+	errs = append(errs, checkLangMap(langTextRules{
+		Field: "audit.retention_i18n", MaxLen: MaxAuditRetentionLen, Runes: true,
+	}, a.RetentionI18n)...)
+	if en, ok := a.RetentionI18n[DefaultNoticeLang]; ok && a.Retention != en {
+		errs = append(errs, errors.New("audit.retention_i18n.en: must equal audit.retention (or omit audit.retention)"))
 	}
 	return errs
 }
@@ -298,12 +317,16 @@ type Validate struct {
 // Audit makes the audit log (see Audit) record the value, so it is not allowed
 // together with Secret. A credential with neither flag is never logged.
 type Credential struct {
-	Header        string   `yaml:"header"`
-	Label         string   `yaml:"label"`
-	Secret        bool     `yaml:"secret"`
-	Audit         bool     `yaml:"audit"`
-	Optional      bool     `yaml:"optional"`
-	AllowedValues []string `yaml:"allowed_values"`
+	Header string `yaml:"header"`
+	Label  string `yaml:"label"`
+	// Labels optionally maps a language code to the label for that language;
+	// it must have an "en" entry, which equals Label (and stands in for it
+	// when Label is omitted).
+	Labels        map[string]string `yaml:"labels"`
+	Secret        bool              `yaml:"secret"`
+	Audit         bool              `yaml:"audit"`
+	Optional      bool              `yaml:"optional"`
+	AllowedValues []string          `yaml:"allowed_values"`
 }
 
 // MaxCredentialValueLen is the longest credential value (bytes) the authorize
@@ -321,35 +344,43 @@ func (u Upstream) AuditedCredentials() []Credential {
 	return out
 }
 
-// NeverLoggedLabels returns the labels (the header name when a credential has
-// no label) of the credentials whose values the server never writes to its
-// logs: every credential that is not audited, in config order. Secret ones
-// included; none of them is stored either, they only travel in the tokens.
-func (u Upstream) NeverLoggedLabels() []string {
-	var out []string
+// MaxCredentialLabelLen is the longest per-language credential label, in characters.
+const MaxCredentialLabelLen = 128
+
+// LabelIn is the label of cr for lang: the requested language's entry in
+// Labels, else Label (the default, en), else the header name.
+func (cr Credential) LabelIn(lang string) LangText {
+	if t, ok := cr.Labels[lang]; ok {
+		return LangText{Text: t, Lang: lang}
+	}
+	if cr.Label != "" {
+		return LangText{Text: cr.Label, Lang: DefaultNoticeLang}
+	}
+	return LangText{Text: cr.Header, Lang: DefaultNoticeLang}
+}
+
+// NeverLoggedLabels returns the labels (in lang, falling back to the default
+// label, then the header name) of the credentials whose values the server
+// never writes to its logs: every credential that is not audited, in config
+// order. Secret ones included; none of them is stored either, they only
+// travel in the tokens.
+func (u Upstream) NeverLoggedLabels(lang string) []LangText {
+	var out []LangText
 	for _, cr := range u.Credentials {
 		if cr.Audit && !cr.Secret {
 			continue
 		}
-		if cr.Label != "" {
-			out = append(out, cr.Label)
-		} else {
-			out = append(out, cr.Header)
-		}
+		out = append(out, cr.LabelIn(lang))
 	}
 	return out
 }
 
-// AuditedLabels returns the labels (the header name when a credential has no
-// label) of the audited credentials, in config order, for the authorize page.
-func (u Upstream) AuditedLabels() []string {
-	var out []string
+// AuditedLabels returns the labels (as NeverLoggedLabels) of the audited
+// credentials, in config order, for the authorize page.
+func (u Upstream) AuditedLabels(lang string) []LangText {
+	var out []LangText
 	for _, cr := range u.AuditedCredentials() {
-		if cr.Label != "" {
-			out = append(out, cr.Label)
-		} else {
-			out = append(out, cr.Header)
-		}
+		out = append(out, cr.LabelIn(lang))
 	}
 	return out
 }
@@ -454,6 +485,7 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	if err := cfg.loadKeys(); err != nil {
 		errs = append(errs, err)
 	}
+	errs = append(errs, cfg.OAuth.Page.Terms.load()...)
 	errs = append(errs, cfg.validate()...)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("invalid config: %w", errors.Join(errs...))
@@ -475,6 +507,7 @@ func (c *Config) resolvePaths(baseDir string) {
 			*p = filepath.Join(baseDir, *p)
 		}
 	}
+	c.OAuth.Page.Terms.resolvePaths(baseDir)
 }
 
 func (c *Config) applyDefaults() {
@@ -490,6 +523,12 @@ func (c *Config) applyDefaults() {
 		c.Log.Level = DefaultLogLevel
 	}
 	c.Audit.Retention = strings.TrimSpace(c.Audit.Retention)
+	for l, t := range c.Audit.RetentionI18n {
+		c.Audit.RetentionI18n[l] = strings.TrimSpace(t)
+	}
+	if en := c.Audit.RetentionI18n[DefaultNoticeLang]; c.Audit.Retention == "" && en != "" {
+		c.Audit.Retention = en
+	}
 	c.OAuth.Page.normalize()
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	if c.Log.Format == "" {
@@ -516,7 +555,14 @@ func (c *Config) applyDefaults() {
 			u.Title = u.Name
 		}
 		for j := range u.Credentials {
-			if cr := &u.Credentials[j]; cr.Label == "" {
+			cr := &u.Credentials[j]
+			for l, t := range cr.Labels {
+				cr.Labels[l] = strings.TrimSpace(t)
+			}
+			if cr.Label == "" {
+				cr.Label = cr.Labels[DefaultNoticeLang]
+			}
+			if cr.Label == "" {
 				cr.Label = cr.Header
 			}
 		}
@@ -833,6 +879,12 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 		}
 		if cr.Audit && cr.Secret {
 			add("credentials[%d].audit: not allowed together with secret (a secret is never logged)", j)
+		}
+		errs = append(errs, checkLangMap(langTextRules{
+			Field: fmt.Sprintf("upstreams[%d].credentials[%d].labels", i, j), MaxLen: MaxCredentialLabelLen, Runes: true,
+		}, cr.Labels)...)
+		if en, ok := cr.Labels[DefaultNoticeLang]; ok && cr.Label != en {
+			add("credentials[%d].labels.en: must equal label (or omit label)", j)
 		}
 		switch {
 		case cr.Header == "":

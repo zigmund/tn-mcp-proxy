@@ -38,6 +38,10 @@ const (
 	retryAfterUnavailable = "30"
 	// requestField is the hidden form field holding the sealed request.
 	requestField = "request"
+	// acceptTermsField is the terms-of-use checkbox; acceptTermsValue is what
+	// the form's checkbox sends when ticked.
+	acceptTermsField = "accept_terms"
+	acceptTermsValue = "on"
 )
 
 // OAuth error codes (RFC 6749 §4.1.2.1, RFC 8707).
@@ -76,6 +80,9 @@ type authRequest struct {
 	CodeChallenge string `json:"ch"`
 	State         string `json:"s,omitempty"`
 	Upstream      string `json:"u"`
+	// Terms is the terms version the form was rendered with ("" when none).
+	// A submit is accepted only against the current version.
+	Terms string `json:"t,omitempty"`
 }
 
 // authFailure is a failed authorize request. When RedirectURI is empty it is
@@ -106,6 +113,7 @@ func redirectFailure(uri, state, code, desc string) *authFailure {
 type formField struct {
 	ID       string
 	Label    string
+	Lang     string // language of Label when it differs from the page's, else empty
 	Secret   bool
 	Optional bool
 	Value    string // never set for secret fields
@@ -113,9 +121,19 @@ type formField struct {
 
 // auditNotice is the "What this server logs" panel; nil when audit is off.
 type auditNotice struct {
-	Retention   string
-	Logged      []string // labels of the audited credentials
-	NeverLogged []string // labels of the credentials the server never logs
+	Retention   slot
+	Logged      []slot            // one sentence per audited credential
+	NeverLogged []config.LangText // labels of the credentials the server never logs
+}
+
+// termsView is the terms block of the form. A Lang field is set only when that
+// part is not in the page language, so the template can mark it.
+type termsView struct {
+	Version    string
+	Paragraphs []string
+	TextLang   string
+	URL        string
+	URLLang    string
 }
 
 // formPage is the data of templates/authorize.html. Every user-visible string
@@ -133,8 +151,12 @@ type formPage struct {
 	Error         message // zero when there is no banner
 	Audit         *auditNotice
 	Notice        []string // operator notice paragraphs, plain text
-	Contact       string   // visible text of the operator contact
-	ContactHref   string   // mailto: or https: link target
+	NoticeLang    string   // language of Notice when it differs from the page's
+	LangLinks     []langLink
+	Terms         *termsView // nil when no terms are configured
+	TermsInvalid  bool       // the terms checkbox was not ticked
+	Contact       string     // visible text of the operator contact
+	ContactHref   string     // mailto: or https: link target
 }
 
 // errorPage is the data of templates/error.html.
@@ -148,7 +170,7 @@ type errorPage struct {
 // code). Method filtering is done by the mux patterns. No CORS headers are
 // set: this endpoint is only ever navigated to, never fetched cross-origin.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	l := newLocale(defaultLang) // ld8.48: resolve from the request
+	l := newLocale(negotiateLang(r, ""))
 	if s.sealer == nil {
 		s.log.Error("authorization requested without a sealer")
 		s.writeErrorPage(w, http.StatusInternalServerError, l, uiMsg(msgInternal))
@@ -156,7 +178,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	var fail *authFailure
 	if r.Method == http.MethodPost {
-		fail = s.authorizeSubmit(w, r, l)
+		fail = s.authorizeSubmit(w, r, &l)
 	} else {
 		fail = s.authorizeForm(w, r, l)
 	}
@@ -224,6 +246,7 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale)
 		CodeChallenge: challenge,
 		State:         state,
 		Upstream:      up.Name,
+		Terms:         s.termsVersion(),
 	}
 	sealed, err := s.sealer.Seal(seal.KindAuthRequest, req, s.now().Add(formTTL))
 	if err != nil {
@@ -248,7 +271,10 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale)
 // The sealed field binds all request parameters (and expires), so the POST
 // cannot be steered elsewhere. As defence in depth a browser-declared
 // cross-site POST (Sec-Fetch-Site) is refused.
-func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l locale) *authFailure {
+//
+// l is the page language chosen from the URL and Accept-Language; the form's
+// hidden lang field refines it once the body is parsed. It is display only.
+func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *locale) *authFailure {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return pageFailure(http.StatusForbidden, msgCrossSite)
 	}
@@ -260,6 +286,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l local
 		}
 		return pageFailure(http.StatusBadRequest, msgFormMalformed)
 	}
+	*l = newLocale(negotiateLang(r, r.PostForm.Get(langParam)))
 	sealed := r.PostForm.Get(requestField)
 	req, err := seal.OpenAs[authRequest](s.sealer, seal.KindAuthRequest, sealed)
 	switch {
@@ -283,15 +310,38 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l local
 		return redirectFailure(req.RedirectURI, req.State, codeInvalidTarget, "unknown resource")
 	}
 
-	creds, values, msg := collectCreds(up, r.PostForm)
+	creds, values, msg := collectCreds(up, r.PostForm, l.Lang())
+	form := func(status int, msg message) {
+		s.writeForm(w, status, *l, formArgs{Client: c, Up: up, Req: req, Sealed: sealed, Values: values, Msg: msg,
+			TermsInvalid: msg.ID == msgTermsRequired})
+	}
+
+	// Terms come first: a missing acceptance costs nothing (no sizing, no
+	// allow-list lookup, no upstream call, no global-ceiling charge), and the
+	// answer does not depend on the credentials.
+	if cur := s.termsVersion(); cur != "" && (req.Terms != cur || r.PostForm.Get(acceptTermsField) != acceptTermsValue) {
+		if req.Terms != cur {
+			// The form was rendered under other terms (changed config or
+			// restart): show the current ones and bind the form to them.
+			req.Terms = cur
+			ns, err := s.sealer.Seal(seal.KindAuthRequest, req, s.now().Add(formTTL))
+			if err != nil {
+				s.log.Error("sealing authorize request", "err", err)
+				return pageFailure(http.StatusInternalServerError, msgInternal)
+			}
+			sealed = ns
+		}
+		form(http.StatusBadRequest, uiMsg(msgTermsRequired))
+		return nil
+	}
 	if msg.ID != "" {
-		s.writeForm(w, http.StatusBadRequest, l, formArgs{c, up, req, sealed, values, msg})
+		form(http.StatusBadRequest, msg)
 		return nil
 	}
 
 	// Before any upstream call and before sealing: input too long for a token.
 	if !credsFit(up, req, creds) {
-		s.writeForm(w, http.StatusBadRequest, l, formArgs{c, up, req, sealed, values, uiMsg(msgCredsTooLong)})
+		form(http.StatusBadRequest, uiMsg(msgCredsTooLong))
 		return nil
 	}
 
@@ -300,7 +350,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l local
 	if !up.CredsAllowed(creds) {
 		s.log.Info("authorize refused: credentials not in allowed_values",
 			append([]any{"upstream", up.Name}, s.audit.Who(s.clientIP(r), up, creds)...)...)
-		s.writeForm(w, http.StatusBadRequest, l, formArgs{c, up, req, sealed, values, rejectedMessage(up)})
+		form(http.StatusBadRequest, rejectedMessage(up))
 		return nil
 	}
 
@@ -308,7 +358,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l local
 		if status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", retryAfterUnavailable)
 		}
-		s.writeForm(w, status, l, formArgs{c, up, req, sealed, values, msg})
+		form(status, msg)
 		return nil
 	}
 
@@ -344,14 +394,22 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l local
 		return redirectFailure(req.RedirectURI, req.State, codeServerError, "internal error")
 	}
 	s.log.Debug("authorization code issued", "upstream", up.Name, "client_name", c.Name)
-	s.audit.Record(r.Context(), audit.EventAuthorize,
+	attrs := []slog.Attr{
 		slog.String("client_ip", s.clientIP(r)),
 		slog.String("upstream", up.Name),
 		slog.String("client_id", shortID(req.ClientID)),
 		slog.String("redirect_host", redirectHost(req.RedirectURI)),
+		slog.String("lang", l.Lang()),
 		s.audit.Creds(up, creds),
-	)
-	s.redirect(w, r, l, req.RedirectURI, req.State, url.Values{"code": {code}})
+	}
+	if t := s.cfg.OAuth.Page.Terms; t != nil {
+		// The version the user accepted: a submit without acceptance never
+		// gets here.
+		v, _ := s.cfg.OAuth.Page.TermsFor(l.Lang())
+		attrs = append(attrs, slog.String("terms_version", t.Version), slog.String("terms_lang", v.TextLang))
+	}
+	s.audit.Record(r.Context(), audit.EventAuthorize, attrs...)
+	s.redirect(w, r, *l, req.RedirectURI, req.State, url.Values{"code": {code}})
 	return nil
 }
 
@@ -439,7 +497,7 @@ func (s *Server) upstreamByName(name string) (config.Upstream, bool) {
 // collectCreds reads the credential fields of up from form. It returns the
 // header->value map, the non-secret values for re-rendering, and a user-facing
 // message when validation fails (the message never contains a value).
-func collectCreds(up config.Upstream, form url.Values) (creds, values map[string]string, msg message) {
+func collectCreds(up config.Upstream, form url.Values, lang string) (creds, values map[string]string, msg message) {
 	creds = make(map[string]string, len(up.Credentials))
 	values = make(map[string]string, len(up.Credentials))
 	for i, cr := range up.Credentials {
@@ -452,11 +510,11 @@ func collectCreds(up config.Upstream, form url.Values) (creds, values map[string
 		case v == "" && cr.Optional:
 			continue
 		case v == "":
-			msg = uiMsg(msgCredRequired, credLabel(cr))
+			msg = uiMsg(msgCredRequired, credLabel(cr, lang))
 		case len(v) > maxCredLen:
-			msg = uiMsg(msgCredTooLong, credLabel(cr))
+			msg = uiMsg(msgCredTooLong, credLabel(cr, lang))
 		case !validCredValue(v):
-			msg = uiMsg(msgCredInvalid, credLabel(cr))
+			msg = uiMsg(msgCredInvalid, credLabel(cr, lang))
 		}
 		if msg.ID != "" {
 			return nil, values, msg
@@ -481,12 +539,8 @@ func validCredValue(v string) bool {
 
 func credFieldID(i int) string { return "cred_" + strconv.Itoa(i) }
 
-func credLabel(cr config.Credential) string {
-	if cr.Label != "" {
-		return cr.Label
-	}
-	return cr.Header
-}
+// credLabel is the label of cr in lang (see config.Credential.LabelIn).
+func credLabel(cr config.Credential, lang string) string { return cr.LabelIn(lang).Text }
 
 // formArgs is what writeForm renders: who asks, for which upstream, the sealed
 // request, the non-secret values to refill, and the banner (zero for none).
@@ -497,6 +551,8 @@ type formArgs struct {
 	Sealed string
 	Values map[string]string
 	Msg    message
+	// TermsInvalid marks the terms checkbox as the cause of Msg.
+	TermsInvalid bool
 }
 
 // writeForm renders the credentials form with the security headers.
@@ -505,7 +561,8 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formAr
 	fields := make([]formField, len(up.Credentials))
 	for i, cr := range up.Credentials {
 		id := credFieldID(i)
-		fields[i] = formField{ID: id, Label: credLabel(cr), Secret: cr.Secret, Optional: cr.Optional, Value: values[id]}
+		lt := cr.LabelIn(l.Lang())
+		fields[i] = formField{ID: id, Label: lt.Text, Lang: otherLang(l, lt.Lang), Secret: cr.Secret, Optional: cr.Optional, Value: values[id]}
 	}
 	title := up.Title
 	if title == "" {
@@ -533,14 +590,28 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formAr
 		Fields:        fields,
 		Error:         msg,
 		Notice:        page.NoticeParagraphs(l.Lang()),
+		NoticeLang:    otherLang(l, page.NoticeIn(l.Lang()).Lang),
+		LangLinks:     langLinks(l, req, up.ResourceURL(s.cfg.PublicURL)),
+		TermsInvalid:  a.TermsInvalid,
 		Contact:       page.ContactText(),
 		ContactHref:   page.ContactHref(),
 	}
 	if s.cfg.Audit.Enabled {
-		data.Audit = &auditNotice{
-			Retention:   s.cfg.Audit.Retention,
-			Logged:      up.AuditedLabels(),
-			NeverLogged: up.NeverLoggedLabels(),
+		an := &auditNotice{
+			Retention:   l.Slot("audit.retention", s.cfg.Audit.RetentionIn(l.Lang())),
+			NeverLogged: nonPageLang(l, up.NeverLoggedLabels(l.Lang())),
+		}
+		for _, lt := range up.AuditedLabels(l.Lang()) {
+			an.Logged = append(an.Logged, l.Slot("audit.your", lt))
+		}
+		data.Audit = an
+	}
+	if v, ok := page.TermsFor(l.Lang()); ok {
+		data.Terms = &termsView{
+			Version: v.Version, Paragraphs: v.Paragraphs, TextLang: otherLang(l, v.TextLang), URL: v.URL,
+		}
+		if v.URL != "" {
+			data.Terms.URLLang = otherLang(l, v.URLLang)
 		}
 	}
 	s.renderPage(w, status, formAction, authorizeTmpl, data)
@@ -654,4 +725,30 @@ func newID() (string, error) {
 		return "", fmt.Errorf("reading random: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
+// otherLang is lang when it is not the page's language, else empty: the
+// templates add a lang attribute only for text in another language.
+func otherLang(l locale, lang string) string {
+	if lang == l.Lang() {
+		return ""
+	}
+	return lang
+}
+
+// nonPageLang returns lts with Lang cleared for the ones in the page language.
+func nonPageLang(l locale, lts []config.LangText) []config.LangText {
+	out := make([]config.LangText, len(lts))
+	for i, lt := range lts {
+		out[i] = config.LangText{Text: lt.Text, Lang: otherLang(l, lt.Lang)}
+	}
+	return out
+}
+
+// termsVersion is the configured terms version, "" when terms are off.
+func (s *Server) termsVersion() string {
+	if t := s.cfg.OAuth.Page.Terms; t != nil {
+		return t.Version
+	}
+	return ""
 }

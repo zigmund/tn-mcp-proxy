@@ -62,7 +62,7 @@ func TestAuditAccessors(t *testing.T) {
 		t.Errorf("Audit = %+v", cfg.Audit)
 	}
 	up := cfg.Upstreams[0]
-	if got := up.AuditedLabels(); !slices.Equal(got, []string{"API key"}) {
+	if got := labelTexts(up.AuditedLabels("en")); !slices.Equal(got, []string{"API key"}) {
 		t.Errorf("AuditedLabels = %v", got)
 	}
 	if got := up.AuditedCredentials(); len(got) != 1 || got[0].Header != "X-TN-API-Key" {
@@ -70,7 +70,7 @@ func TestAuditAccessors(t *testing.T) {
 	}
 	// Label defaults to the header; a secret is never audited even if built by hand.
 	u := Upstream{Credentials: []Credential{{Header: "X-A", Audit: true}, {Header: "X-B", Audit: true, Secret: true}}}
-	if got := u.AuditedLabels(); !slices.Equal(got, []string{"X-A"}) {
+	if got := labelTexts(u.AuditedLabels("en")); !slices.Equal(got, []string{"X-A"}) {
 		t.Errorf("AuditedLabels(hand-built) = %v", got)
 	}
 }
@@ -103,7 +103,16 @@ func TestExampleConfigAuditBlock(t *testing.T) {
 	if !cfg.Audit.Enabled || cfg.Audit.Retention != "12 months" {
 		t.Errorf("Audit = %+v", cfg.Audit)
 	}
-	if got := cfg.Upstreams[0].AuditedLabels(); !slices.Equal(got, []string{"API key"}) {
+	if got := labelTexts(cfg.Upstreams[0].AuditedLabels("en")); !slices.Equal(got, []string{"API key"}) {
 		t.Errorf("AuditedLabels = %v", got)
 	}
+}
+
+// labelTexts is the text of each label, for assertions.
+func labelTexts(lts []LangText) []string {
+	out := make([]string, len(lts))
+	for i, lt := range lts {
+		out[i] = lt.Text
+	}
+	return out
 }

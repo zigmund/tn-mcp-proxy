@@ -16,3 +16,6 @@ coverage.out
 
 # GoReleaser output
 dist/
+
+# Local-only README diagram generator
+/scripts/diagram/

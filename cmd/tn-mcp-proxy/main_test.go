@@ -6,9 +6,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -23,12 +25,12 @@ import (
 	"time"
 )
 
-const testConfig = `
+var testConfig = `
 listen: 127.0.0.1:0
 public_url: https://mcp.example.com
 log: {level: info, format: text}
 secrets:
-  token_keys: ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]
+  token_keys: ["` + testKey("main") + `"]
 upstreams:
   - name: tn
     path: /tn/mcp
@@ -345,7 +347,18 @@ func TestExampleConfigLoads(t *testing.T) {
 	if !strings.Contains(string(raw), "listen: 127.0.0.1:8787") {
 		t.Fatal("example config no longer sets listen: 127.0.0.1:8787; update this test")
 	}
-	cfg := writeConfig(t, strings.Replace(string(raw), "listen: 127.0.0.1:8787", "listen: 127.0.0.1:0", 1))
+	const credPath = "token_keys_file: /run/credentials/tn-mcp-proxy.service/keys"
+	if !strings.Contains(string(raw), credPath) {
+		t.Fatal("example config no longer uses " + credPath + "; update this test")
+	}
+	// Point the systemd credential path at a temp key file (not a pattern key).
+	keys := filepath.Join(t.TempDir(), "keys")
+	if err := os.WriteFile(keys, []byte(testKey("main-file")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	y := strings.Replace(string(raw), "listen: 127.0.0.1:8787", "listen: 127.0.0.1:0", 1)
+	y = strings.Replace(y, credPath, "token_keys_file: "+keys, 1)
+	cfg := writeConfig(t, y)
 
 	var stderr syncBuffer
 	ctx, cancel := context.WithCancel(context.Background())
@@ -380,5 +393,61 @@ func TestFlags(t *testing.T) {
 	}
 	if n := strings.Count(stderr.String(), "flag provided but not defined"); n != 1 {
 		t.Errorf("flag error printed %d times:\n%s", n, stderr.String())
+	}
+}
+
+// testKey derives a deterministic, non-patterned 32-byte key from seed, so no
+// key literal lives in the repository.
+func testKey(seed string) string {
+	h := sha256.Sum256([]byte(seed))
+	return base64.StdEncoding.EncodeToString(h[:])
+}
+
+// runUntilReady starts execute with body, waits until it listens, stops it and
+// returns the log output.
+func runUntilReady(t *testing.T, body string) string {
+	t.Helper()
+	cfg := writeConfig(t, body)
+	var stderr syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readyc := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- execute(ctx, []string{"-config", cfg}, &stderr, &stderr, hooks{ready: func(net.Addr) { close(readyc) }})
+	}()
+	select {
+	case <-readyc:
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	case err := <-done:
+		t.Fatalf("execute failed: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout")
+	}
+	return stderr.String()
+}
+
+func TestAllowInsecureHTTPWarning(t *testing.T) {
+	const marker = "allow_insecure_http is set"
+	logs := runUntilReady(t, "allow_insecure_http: true\n"+strings.Replace(testConfig, "https://mcp.example.com", "http://mcp.example.com", 1))
+	if n := strings.Count(logs, marker); n != 1 {
+		t.Fatalf("warning logged %d times:\n%s", n, logs)
+	}
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, marker) {
+			if !strings.Contains(line, "WARN") {
+				t.Errorf("not a WARN line: %s", line)
+			}
+			if strings.Contains(line, "mcp.example.com") || strings.Contains(line, "upstream.example.com") {
+				t.Errorf("warning contains a URL: %s", line)
+			}
+		}
+	}
+
+	if logs := runUntilReady(t, testConfig); strings.Contains(logs, marker) {
+		t.Errorf("unexpected warning without allow_insecure_http:\n%s", logs)
 	}
 }

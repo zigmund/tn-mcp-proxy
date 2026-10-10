@@ -66,7 +66,7 @@ func TestE2EValidatedAuthorize(t *testing.T) {
 	cfg, err := config.Parse([]byte(fmt.Sprintf(`
 public_url: %s
 secrets:
-  token_keys: ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]
+  token_keys: ["`+testKey("e2e")+`"]
 oauth:
   allowed_redirect_uris: ["%s"]
 upstreams:

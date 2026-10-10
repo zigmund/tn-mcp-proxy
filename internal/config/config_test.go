@@ -1,7 +1,7 @@
 package config
 
 import (
-	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -14,9 +14,15 @@ import (
 )
 
 var (
-	key1 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
-	key2 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
+	key1 = testKey("key1")
+	key2 = testKey("key2")
 )
+
+// testKey derives a deterministic, non-patterned 32-byte key from seed.
+func testKey(seed string) string {
+	h := sha256.Sum256([]byte(seed))
+	return base64.StdEncoding.EncodeToString(h[:])
+}
 
 const upstreamYAML = `
 upstreams:
@@ -79,6 +85,7 @@ func TestParseDefaults(t *testing.T) {
 
 func TestParseExplicitValues(t *testing.T) {
 	y := `
+allow_insecure_http: true
 listen: 0.0.0.0:9000
 public_url: http://localhost:9000
 log: { level: DEBUG, format: text }
@@ -111,7 +118,7 @@ upstreams:
 	if !cfg.TLSEnabled() || cfg.TLS.ReloadInterval != time.Minute {
 		t.Errorf("tls: %+v", cfg.TLS)
 	}
-	if len(cfg.Secrets.Keys) != 2 || cfg.Secrets.Keys[0][0] != 1 || cfg.Secrets.Keys[1][0] != 2 {
+	if len(cfg.Secrets.Keys) != 2 || base64.StdEncoding.EncodeToString(cfg.Secrets.Keys[0]) != key1 || base64.StdEncoding.EncodeToString(cfg.Secrets.Keys[1]) != key2 {
 		t.Errorf("keys order wrong")
 	}
 	u := cfg.Upstreams[0]
@@ -262,7 +269,7 @@ func TestKeysFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Secrets.Keys) != 2 || cfg.Secrets.Keys[0][0] != 1 || cfg.Secrets.Keys[1][0] != 2 {
+	if len(cfg.Secrets.Keys) != 2 || base64.StdEncoding.EncodeToString(cfg.Secrets.Keys[0]) != key1 || base64.StdEncoding.EncodeToString(cfg.Secrets.Keys[1]) != key2 {
 		t.Fatalf("keys: %d", len(cfg.Secrets.Keys))
 	}
 
@@ -307,7 +314,24 @@ func TestLoadMissingFile(t *testing.T) {
 }
 
 func TestExampleConfig(t *testing.T) {
-	cfg, err := Load(filepath.Join("..", "..", "deploy", "config.example.yaml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const credPath = "token_keys_file: /run/credentials/tn-mcp-proxy.service/keys"
+	if !strings.Contains(string(raw), credPath) {
+		t.Fatal("example config no longer uses " + credPath + "; update this test")
+	}
+	// The example references a systemd credential; point it at a temp key file.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "keys"), []byte(key1+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(strings.Replace(string(raw), credPath, "token_keys_file: keys", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
 	if err != nil {
 		t.Fatal(err)
 	}

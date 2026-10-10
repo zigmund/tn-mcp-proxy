@@ -25,7 +25,7 @@ func TestPublicURLNormalization(t *testing.T) {
 		"http://[::1]:8080":            "http://[::1]:8080",
 	}
 	for in, want := range tests {
-		y := strings.Replace(base(), "https://mcp.example.com/", in, 1)
+		y := "allow_insecure_http: true\n" + strings.Replace(base(), "https://mcp.example.com/", in, 1)
 		cfg, err := Parse([]byte(y), ".")
 		if err != nil {
 			t.Errorf("%s: %v", in, err)

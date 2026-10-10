@@ -533,7 +533,10 @@ everything else is wrapped by `httplog`.
 `http.Server` settings: `ReadHeaderTimeout` 10s (slowloris), `IdleTimeout`
 120s (above nginx's 60s upstream keepalive), `MaxHeaderBytes` 64 KiB. There is
 intentionally no `ReadTimeout`/`WriteTimeout`: they are absolute deadlines and
-would cut SSE streams and slow tool calls. `net/http` server errors go to the
+would cut SSE streams and slow tool calls. OAuth and `/.well-known/*` requests,
+which never stream, get a per-request read deadline of 10s instead
+(`http.ResponseController.SetReadDeadline`; slow-body protection), and with
+built-in TLS every response carries `Strict-Transport-Security`. `net/http` server errors go to the
 slog logger at `warn`.
 
 Signals: `SIGINT`/`SIGTERM` start a graceful shutdown (15s). Streams that

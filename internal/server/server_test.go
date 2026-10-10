@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net"
@@ -19,11 +21,11 @@ import (
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
 )
 
-const testYAML = `
+var testYAML = `
 listen: 127.0.0.1:0
 public_url: https://mcp.example.com
 secrets:
-  token_keys: ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]
+  token_keys: ["` + testKey("server") + `"]
 upstreams:
   - name: tn
     path: /tn/mcp
@@ -314,4 +316,11 @@ func (s *syncBuf) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// testKey derives a deterministic, non-patterned 32-byte key from seed, so no
+// key literal lives in the repository.
+func testKey(seed string) string {
+	h := sha256.Sum256([]byte(seed))
+	return base64.StdEncoding.EncodeToString(h[:])
 }

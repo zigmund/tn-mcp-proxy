@@ -217,7 +217,10 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
 
 - No database or stored credentials; tokens are self-contained sealed blobs.
 - The host sees credentials in plaintext on the authorize form: run the proxy
-  only on a host you trust, always behind TLS, and keep `public_url` on `https`.
+  only on a host you trust, always behind TLS, and keep `public_url` on `https`
+  (enforced: `http` is accepted only for loopback or with
+  `allow_insecure_http`; the same goes for redirect URIs and upstream URLs).
+  Known-weak token keys, including the old example key, are rejected at startup.
 - Set `validate` on every upstream: without it the form accepts any values and
   anyone who can reach the server could mint a token and use it as a relay.
   With it, a code is issued only for credentials the upstream accepts (the check

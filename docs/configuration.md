@@ -371,15 +371,32 @@ client is evicted. A new client is therefore never refused because of table
 size; a flood of distinct addresses can only reset the buckets of the oldest
 clients (a hot `/48` stays in its table).
 
-`POST /oauth/authorize` additionally passes a global, unkeyed token bucket
-(`oauth.rate_limit.authorize_global`, `per_minute` and `burst`). Left at `0` it
-is derived so that the single-use code cache (50 000 entries) cannot fill: with
-`m` = `oauth.code_ttl` rounded up to whole minutes (at least 1), `per_minute =
-burst = 50000 / 4 / m`, which is 2 500 for the default 5 minutes (a longer `code_ttl`
+`POST /oauth/authorize` additionally has a global, unkeyed token bucket
+(`oauth.rate_limit.authorize_global`, `per_minute` and `burst`). It is charged
+only for a submission that is about to get a code: after the form was parsed and
+fitted the size budget, the credentials passed the allow-list (`allowed_values`)
+and, when configured, the upstream `validate` check. Foreign, malformed or
+upstream-rejected submissions never spend it, so a flood of them cannot lock the
+owner out of reconnecting; they are bounded by the per-IP limits above (charged
+up front, validation calls included). A valid submission refused by the ceiling
+gets the same `429` page with `Retry-After`; its per-IP token stays spent.
+
+The aggregate rate of upstream `validate` calls is not globally capped: it is
+bounded by the per-IP tiers and by the checker's 16 concurrent slots. A flood
+from many addresses that saturates the slots makes `validate` answer `503`
+(also to the owner) until the `validate` timeout frees them. On any public
+upstream that uses `validate`, set `allowed_values`: foreign keys are then
+refused before any upstream call.
+
+Left at `0` the ceiling is derived so that the single-use code cache (50 000
+entries) cannot fill: with `m` = `oauth.code_ttl` rounded up to whole minutes
+(at least 1), `per_minute = burst = 50000 / 4 / m`, which is 2 500 for the
+default 5 minutes (a longer `code_ttl`
 lowers it: 1 250 at `10m`). A code occupies a cache slot for at most `code_ttl`,
 so at most `burst + per_minute * m`, at most half the cache (15 000 live codes
 by default), exist at once. The price is that a flood from many sources can
-make new logins wait (429 with `Retry-After`) instead of filling the cache;
+make new logins wait (429 with `Retry-After`) instead of filling the cache (only
+submissions that pass the credential checks count toward this);
 that clears as soon as the flood stops. Raise it only if you really expect
 more than that many logins per minute; a value above the derived one gives up
 the cache guarantee, and a warning is logged at startup when the configured

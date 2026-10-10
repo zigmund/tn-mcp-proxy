@@ -283,6 +283,13 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return nil
 	}
 
+	// Only a submission that is about to get a code is charged against the
+	// global ceiling (it bounds live codes); everything above is bounded by the
+	// per-IP limits charged up front.
+	if !s.chargeGlobalAuthorize(w) {
+		return pageFailure(http.StatusTooManyRequests, "Too many requests. Please wait a moment and try again.")
+	}
+
 	jti, err := newID()
 	if err != nil {
 		s.log.Error("generating code id", "err", err)

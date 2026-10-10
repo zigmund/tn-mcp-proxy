@@ -109,10 +109,11 @@ func (s *Server) limit(name string, deny func(w http.ResponseWriter, r *http.Req
 
 // limitMethod wraps next with the per-IP limiter named name, counting only
 // requests of the given method (HEAD counts as GET).
-// A client is charged at every tier of its address (see ratelimit.Keys) and,
-// for authorize, against the global ceiling; the request passes only if all
-// allow it, and a refused one costs no tokens. A denied request gets 429 with
-// Retry-After via deny.
+// A client is charged at every tier of its address (see ratelimit.Keys); the
+// request passes only if all allow it, and a refused one costs no tokens. A
+// denied request gets 429 with Retry-After via deny. The global authorize
+// ceiling is not charged here but by chargeGlobalAuthorize, once a submission
+// is about to get a code.
 func (s *Server) limitMethod(name, method string, deny func(w http.ResponseWriter, r *http.Request), next http.Handler) http.Handler {
 	lim := s.limits[name]
 	if lim == nil {
@@ -122,9 +123,7 @@ func (s *Server) limitMethod(name, method string, deny func(w http.ResponseWrite
 	if tiers[1] == nil || tiers[2] == nil { // hand-built maps in tests
 		tiers = tiers[:1]
 	}
-	var global *ratelimit.Limiter
 	if name == authorizeKey {
-		global = s.limits[globalKey]
 		s.warnGlobalOversized()
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,18 +138,6 @@ func (s *Server) limitMethod(name, method string, deny func(w http.ResponseWrite
 		ip := s.clientIP(r)
 		keys := ratelimit.Keys(ip)
 		ok, wait := ratelimit.Charge(tiers, keys)
-		if ok && global != nil {
-			if ok, wait = global.Allow(""); !ok {
-				for i := range min(len(tiers), len(keys)) {
-					tiers[i].Refund(keys[i])
-				}
-				if n := global.TakeDenied(s.now(), globalLogInterval); n > 0 {
-					// Counts only; the clients are not identifiable (and not at fault).
-					s.log.Warn("global authorize ceiling reached; delaying new logins",
-						"endpoint", name, "denied_since_last_log", n, "retry_after", wait.String())
-				}
-			}
-		}
 		if ok {
 			next.ServeHTTP(w, r)
 			return
@@ -160,6 +147,31 @@ func (s *Server) limitMethod(name, method string, deny func(w http.ResponseWrite
 		w.Header().Set("Retry-After", retryAfterSeconds(wait))
 		deny(w, r)
 	})
+}
+
+// chargeGlobalAuthorize takes one token from the unkeyed ceiling on code
+// issuance. It is called by the authorize submit handler right before a code is
+// sealed, i.e. only for submissions that passed parsing, the size budget, the
+// allow-list and the upstream check, so requests that can never yield a code
+// cannot exhaust it. When the ceiling is empty it sets Retry-After on w and
+// returns false: the caller answers 429 like the per-IP limit does. Each
+// submission is charged at most once (it is the only call site).
+func (s *Server) chargeGlobalAuthorize(w http.ResponseWriter) bool {
+	global := s.limits[globalKey]
+	if global == nil {
+		return true
+	}
+	ok, wait := global.Allow("")
+	if ok {
+		return true
+	}
+	if n := global.TakeDenied(s.now(), globalLogInterval); n > 0 {
+		// Counts only; the clients are not identifiable (and not at fault).
+		s.log.Warn("global authorize ceiling reached; delaying new logins",
+			"endpoint", authorizeKey, "denied_since_last_log", n, "retry_after", wait.String())
+	}
+	w.Header().Set("Retry-After", retryAfterSeconds(wait))
+	return false
 }
 
 // retryAfterSeconds renders d as whole seconds, rounded up, at least 1.

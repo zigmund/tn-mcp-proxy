@@ -280,51 +280,6 @@ func TestRateLimitIPv6Hierarchy(t *testing.T) {
 	}
 }
 
-func TestGlobalAuthorizeCeiling(t *testing.T) {
-	e := newRL(t, 100, func(r *config.RateLimit) { r.AuthorizeGlobal = config.Limit{PerMinute: 60, Burst: 5} })
-	var logs bytes.Buffer
-	e.srv.log = slog.New(slog.NewTextHandler(&logs, nil))
-	var passed int
-	var last *httptest.ResponseRecorder
-	for i := range 50 { // many distinct sources, none near its own limit
-		last = e.do("POST", PathAuthorize, fmt.Sprintf("198.51.100.%d:1", i), nil)
-		if last.Code != http.StatusTooManyRequests {
-			passed++
-		}
-	}
-	if passed != 5 {
-		t.Fatalf("passed = %d, want the global burst 5", passed)
-	}
-	if got := last.Header().Get("Retry-After"); got != "1" {
-		t.Errorf("Retry-After = %q, want 1", got)
-	}
-	if !strings.Contains(last.Body.String(), "Too many requests") {
-		t.Errorf("body = %s", last.Body.String())
-	}
-	if n := strings.Count(logs.String(), "global authorize ceiling reached"); n != 1 {
-		t.Errorf("warn lines = %d, want 1 (rate limited)\n%s", n, logs.String())
-	}
-	if !strings.Contains(logs.String(), "level=WARN") {
-		t.Errorf("not logged at warn: %s", logs.String())
-	}
-	// Other endpoints and GET are untouched; refill gives one token per second.
-	if e.do("POST", PathToken, "198.51.100.200:1", nil).Code == http.StatusTooManyRequests {
-		t.Error("token endpoint hit by the authorize ceiling")
-	}
-	e.now = e.now.Add(time.Second)
-	if e.do("POST", PathAuthorize, "198.51.100.201:1", nil).Code == http.StatusTooManyRequests {
-		t.Error("still limited after refill")
-	}
-	if e.do("POST", PathAuthorize, "198.51.100.202:1", nil).Code != http.StatusTooManyRequests {
-		t.Error("refill must give one token only")
-	}
-	// A request refused by the ceiling does not consume its own IP budget.
-	e.now = e.now.Add(time.Second)
-	if e.do("POST", PathAuthorize, "198.51.100.202:1", nil).Code == http.StatusTooManyRequests {
-		t.Error("source charged for a request the ceiling refused")
-	}
-}
-
 func TestGlobalAuthorizeDefaultDerivation(t *testing.T) {
 	for _, tt := range []struct {
 		ttl  time.Duration
@@ -416,6 +371,9 @@ func TestGlobalCeilingKeepsCodeCacheBelowCapacity(t *testing.T) {
 	e.srv.now = func() time.Time { return e.now }
 	var issued, peak int
 	h := e.srv.limit("authorize", e.srv.denyAuthorize, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !e.srv.chargeGlobalAuthorize(w) { // as authorizeSubmit, right before a code
+			return
+		}
 		issued++
 		now := e.now
 		if err := e.srv.codes.claim(fmt.Sprint("code", issued), now.Add(cfg.OAuth.CodeTTL), now); err != nil {

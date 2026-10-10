@@ -216,3 +216,39 @@ func TestOtherMethodsNotAllowed(t *testing.T) {
 		}
 	}
 }
+
+// TestIssuerIdentical checks the RFC 9207 requirement ChatGPT relies on: the
+// AS metadata issuer (both documents), every PRM authorization_servers entry
+// and the iss of a successful authorization redirect are the same byte string.
+func TestIssuerIdentical(t *testing.T) {
+	base := "https://mcp.example.com"
+	mux := newMux(t, base, upTN, upOther)
+	issuers := map[string]string{}
+	for _, p := range []string{PathAuthServerMetadata, PathOIDCMetadata} {
+		m := decode[AuthServerMetadata](t, do(mux, http.MethodGet, p))
+		if !m.AuthorizationResponseIssParameterSupported {
+			t.Errorf("%s: authorization_response_iss_parameter_supported not true", p)
+		}
+		issuers[p] = m.Issuer
+	}
+	for _, u := range []config.Upstream{upTN, upOther} {
+		prm := decode[ProtectedResourceMetadata](t, do(mux, http.MethodGet, PathResourceMetadataPrefix+u.Path))
+		if len(prm.AuthorizationServers) != 1 {
+			t.Fatalf("%s: authorization_servers = %v", u.Path, prm.AuthorizationServers)
+		}
+		issuers["prm"+u.Path] = prm.AuthorizationServers[0]
+	}
+	for k, v := range issuers {
+		if v != base {
+			t.Errorf("%s: issuer %q, want %q", k, v, base)
+		}
+	}
+
+	// The iss of a successful authorization redirect is the same string.
+	e := newAZ(t)
+	sealed := hidden(t, e.get(e.query(nil)).Body.String())
+	iss := mustSeeOther(t, e.post(goodForm(sealed))).Query().Get("iss")
+	if iss != issuers[PathAuthServerMetadata] {
+		t.Errorf("authorize iss %q, metadata issuer %q", iss, issuers[PathAuthServerMetadata])
+	}
+}

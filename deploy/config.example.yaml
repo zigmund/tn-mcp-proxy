@@ -3,7 +3,7 @@
 # Address the HTTP server binds to (nginx terminates TLS in front of it).
 listen: 127.0.0.1:8787
 
-# Public base URL as seen by claude.ai. Absolute http(s), no query/fragment.
+# Public base URL as seen by claude.ai or ChatGPT. Absolute http(s), no query/fragment.
 public_url: https://mcp.example.com
 
 log:
@@ -32,10 +32,11 @@ oauth:
   allowed_redirect_uris:
     - https://claude.ai/api/mcp/auth_callback
     - https://claude.com/api/mcp/auth_callback
+    - https://chatgpt.com/connector_platform_oauth_redirect
 
   # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
   # /oauth/token (429 + Retry-After). Zero or unset values mean these defaults;
-  # they are generous because claude.ai uses shared egress IPs.
+  # they are generous because claude.ai and ChatGPT use shared egress IPs.
   # rate_limit:
   #   disabled: false
   #   register:  { per_minute: 60,  burst: 30 }

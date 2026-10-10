@@ -308,6 +308,22 @@ func TestAuthorizeRedirectedErrors(t *testing.T) {
 	}
 }
 
+// TestAuthorizeSubmitErrorRedirectsCarryIss covers the POST error redirect:
+// RFC 9207 requires iss in error responses too (ChatGPT checks it).
+func TestAuthorizeSubmitErrorRedirectsCarryIss(t *testing.T) {
+	e := newAZ(t)
+	sealed := hidden(t, e.get(e.query(nil)).Body.String())
+	e.srv.cfg.Upstreams = []config.Upstream{{Name: "other", Path: "/o"}}
+	u := mustSeeOther(t, e.post(goodForm(sealed)))
+	q := u.Query()
+	if q.Get("error") != "invalid_target" || q.Get("iss") != azPublic || q.Get("state") != "st&te 1" {
+		t.Errorf("query = %v", q)
+	}
+	if q.Get("code") != "" {
+		t.Error("error redirect carries a code")
+	}
+}
+
 func TestAuthorizeSubmitIssuesCode(t *testing.T) {
 	e := newAZ(t)
 	sealed := hidden(t, e.get(e.query(nil)).Body.String())

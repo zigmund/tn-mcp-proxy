@@ -18,7 +18,7 @@ Error messages never echo URL or key material.
 | `oauth.access_token_ttl` | `1h` | Positive duration |
 | `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry) |
 | `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form. Codes are single-use |
-| `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback` | Absolute http(s) URLs, no duplicates |
+| `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute http(s) URLs, no duplicates |
 | `oauth.rate_limit.disabled` | `false` | Turns the in-app per-IP rate limiting of the OAuth endpoints off. See [Rate limiting](#rate-limiting) |
 | `oauth.rate_limit.register` | `per_minute: 60`, `burst: 30` | Limit for `POST /oauth/register` |
 | `oauth.rate_limit.token` | `per_minute: 300`, `burst: 100` | Limit for `POST /oauth/token` |
@@ -156,8 +156,8 @@ Each hit is logged at `debug` as `rate limit exceeded` (endpoint, client IP,
 retry delay; never the query, headers or body), and the 429 shows up in the
 access log.
 
-The defaults are generous because claude.ai calls register and token from
-shared egress addresses: all connecting users then share one bucket. Raise them
+The defaults are generous because claude.ai and ChatGPT call register and token
+from shared egress addresses: all connecting users then share one bucket. Raise them
 if many users connect at once; lower them on a private deployment.
 
 ```yaml
@@ -277,9 +277,9 @@ server {
     location = /healthz { return 404; }
 
     # OAuth endpoints. The service limits them per client IP on its own; this
-    # nginx limit is optional defence in depth. Keep it generous: claude.ai
-    # calls register/token from shared egress IPs, so all users share one
-    # bucket. Behind a CDN or load balancer restore the real client IP first
+    # nginx limit is optional defence in depth. Keep it generous: claude.ai and
+    # ChatGPT call register/token from shared egress IPs, so all users share
+    # one bucket. Behind a CDN or load balancer restore the real client IP first
     # (ngx_http_realip_module), otherwise everyone shares a bucket.
     location /oauth/ {
         limit_req zone=tn_oauth burst=30 nodelay;

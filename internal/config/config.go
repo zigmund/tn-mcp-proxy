@@ -33,8 +33,8 @@ const (
 	DefaultReloadInterval  = time.Minute
 
 	// Default per-IP rate limits of the OAuth endpoints (requests per minute
-	// and burst). They are generous because claude.ai calls register and token
-	// from shared egress addresses.
+	// and burst). They are generous because claude.ai and ChatGPT call register
+	// and token from shared egress addresses.
 	DefaultRegisterPerMinute  = 60
 	DefaultRegisterBurst      = 30
 	DefaultTokenPerMinute     = 300
@@ -51,6 +51,9 @@ func DefaultRedirectURIs() []string {
 	return []string{
 		"https://claude.ai/api/mcp/auth_callback",
 		"https://claude.com/api/mcp/auth_callback",
+		// ChatGPT's stable callback, used for servers that implement RFC 9207
+		// issuer identification (this one does).
+		"https://chatgpt.com/connector_platform_oauth_redirect",
 	}
 }
 

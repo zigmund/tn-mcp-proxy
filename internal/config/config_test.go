@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,19 @@ upstreams:
 
 func base() string {
 	return "public_url: https://mcp.example.com/\nsecrets:\n  token_keys: [\"" + key1 + "\"]\n" + upstreamYAML
+}
+
+func TestDefaultRedirectURIs(t *testing.T) {
+	got := DefaultRedirectURIs()
+	for _, want := range []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://claude.com/api/mcp/auth_callback",
+		"https://chatgpt.com/connector_platform_oauth_redirect",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("default redirect URIs lack %s: %v", want, got)
+		}
+	}
 }
 
 func TestParseDefaults(t *testing.T) {

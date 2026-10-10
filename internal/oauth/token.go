@@ -269,6 +269,12 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		newExp = old
 	}
 	reuse, err := s.families.use(rt.Family, rt.Gen, newExp, now)
+	// Report evictions on every path (a reuse can evict a revoked entry).
+	if n, revoked := s.families.takeEvictions(now); n > 0 {
+		// Rate limited by the cache; counts only, never ids.
+		s.log.Warn("refresh family cache full, evicting least recently used families",
+			"evicted_since_last_log", n, "of_which_revoked", revoked)
+	}
 	switch {
 	case err == nil:
 	case errors.Is(err, errFamilyRevoked):
@@ -279,6 +285,8 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		grant("family revoked")
 		return
 	default:
+		// families.use only fails with errFamilyRevoked (a full cache evicts),
+		// so this is unreachable; still never issue a token untracked.
 		s.cacheFull(w, "refresh token")
 		return
 	}

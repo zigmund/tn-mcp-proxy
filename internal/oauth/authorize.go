@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
@@ -29,6 +30,9 @@ const (
 	// formTTL bounds how long a rendered form may sit before it is submitted.
 	// It is independent of oauth.code_ttl, which only starts at submission.
 	formTTL = 15 * time.Minute
+	// retryAfterUnavailable is the Retry-After (seconds) of a 503 when the
+	// upstream could not verify the credentials.
+	retryAfterUnavailable = "30"
 	// requestField is the hidden form field holding the sealed request.
 	requestField = "request"
 )
@@ -209,6 +213,9 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) *authFail
 // and the credentials come from the form itself, so a forged cross-site POST
 // can only submit credentials the attacker already has, and the resulting
 // code goes to an allowlisted redirect URI whose client checks its own state.
+// With validate configured the form is also a credential-validity oracle (one
+// authenticated upstream call per submit); the per-IP authorize rate limit
+// bounds it, and a code is only ever issued for credentials the upstream accepts.
 // The sealed field binds all request parameters (and expires), so the POST
 // cannot be steered elsewhere. As defence in depth a browser-declared
 // cross-site POST (Sec-Fetch-Site) is refused.
@@ -253,6 +260,14 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return nil
 	}
 
+	if msg, status := s.validateCreds(r.Context(), up, creds); msg != "" {
+		if status == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", retryAfterUnavailable)
+		}
+		s.writeForm(w, status, c, up, req, sealed, values, msg)
+		return nil
+	}
+
 	jti, err := newID()
 	if err != nil {
 		s.log.Error("generating code id", "err", err)
@@ -280,6 +295,28 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	s.log.Debug("authorization code issued", "upstream", up.Name, "client_name", c.Name)
 	s.redirect(w, r, req.RedirectURI, req.State, url.Values{"code": {code}})
 	return nil
+}
+
+// validateCreds runs the upstream's credential check, if configured. A
+// non-empty msg means no code may be issued: the form is re-rendered with that
+// message and status (400 rejected, 503 no verdict, so the check fails closed).
+func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds map[string]string) (msg string, status int) {
+	if up.Validate == nil {
+		return "", 0
+	}
+	err := s.checker.check(ctx, up, creds)
+	if err == nil {
+		return "", 0
+	}
+	logCheck(s.log, up.Name, err)
+	title := up.Title
+	if title == "" {
+		title = up.Name
+	}
+	if errors.Is(err, errCredsRejected) {
+		return title + " rejected these credentials. Check them and try again.", http.StatusBadRequest
+	}
+	return "Could not verify the credentials with " + title + " right now. Try again later.", http.StatusServiceUnavailable
 }
 
 // lookupClient opens a client_id, mapping failures to page failures.

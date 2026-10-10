@@ -57,6 +57,15 @@ upstreams:
       - { header: X-TN-API-Key,    label: API key }
       - { header: X-TN-API-Secret, label: API secret, secret: true }
       - { header: X-TN-SID,        label: SID, optional: true }
+    # Verify the entered credentials with one authenticated MCP call before a
+    # code is issued; if the upstream rejects them (or cannot be reached), no
+    # token is handed out. Without this block any values are accepted.
+    # The tool must be read-only. get_auth_info checks the API key and secret
+    # but not the optional SID.
+    validate:
+      tool: get_auth_info
+      # arguments: {}              # optional tool arguments (JSON object)
+      # timeout: 10s               # whole check, default 10s, at most 60s
 
 # Optional built-in TLS (both files or neither); leave commented out when a
 # reverse proxy terminates TLS. Relative paths are resolved against this file's

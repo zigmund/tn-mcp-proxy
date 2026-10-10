@@ -97,6 +97,7 @@ upstreams:
       - { header: X-TN-API-Key,    label: API key }
       - { header: X-TN-API-Secret, label: API secret, secret: true }
       - { header: X-TN-SID,        label: SID, optional: true }
+    validate: { tool: get_auth_info }   # check the keys with Tradernet before issuing a token
 ```
 
 Generate the token key (base64 of 32 random bytes) into a root-only file, one
@@ -162,7 +163,9 @@ proxy yourself or use one whose operator you trust.
 2. URL: `public_url` + the upstream `path`, e.g. `https://mcp.example.com/tn/mcp`.
 3. Connect. The browser opens the proxy's authorization page for the upstream:
    enter your Tradernet API key, API secret and (if you use one) SID.
-4. Submit. claude.ai receives tokens; the connector is ready.
+4. Submit. With `validate` configured, the proxy first checks the keys with
+   Tradernet and shows the form again if they are rejected. Otherwise claude.ai
+   receives tokens and the connector is ready.
 
 Your credentials are not stored on the server. They are sealed (encrypted and
 authenticated) inside the tokens that claude.ai holds, and are decrypted only
@@ -213,6 +216,11 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
 - No database or stored credentials; tokens are self-contained sealed blobs.
 - The host sees credentials in plaintext on the authorize form: run the proxy
   only on a host you trust, always behind TLS, and keep `public_url` on `https`.
+- Set `validate` on every upstream: without it the form accepts any values and
+  anyone who can reach the server could mint a token and use it as a relay.
+  With it, a code is issued only for credentials the upstream accepts (the check
+  is read-only, fails closed and never follows redirects; see
+  [docs/configuration.md](docs/configuration.md#credential-validation)).
 - Run a single instance. Single-use authorization codes and refresh-token
   families are tracked in bounded in-memory replay caches, so several instances
   would not see each other's usage.

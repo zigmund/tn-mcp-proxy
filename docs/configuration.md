@@ -49,15 +49,94 @@ in logs, `fmt`, JSON and YAML output.
 | `path` | required | Matches `^(/[A-Za-z0-9._~-]+)+$`, no `.`/`..` segments, no trailing slash. Must not equal or overlap `/oauth`, `/.well-known`, `/healthz`; no upstream path may be a segment-wise prefix of another |
 | `url` | required | Absolute http(s) URL, no userinfo/fragment |
 | `credentials[]` | at least one non-optional | Headers the user supplies |
+| `validate` | absent (no validation) | Optional. Verify the entered credentials against the upstream before a code is issued. See [Credential validation](#credential-validation) |
 
 Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
 input), `optional`. Each credential becomes one input on the authorize form; values are trimmed and must not contain control characters.
 
+`validate` fields: `tool` (required, MCP tool called with the entered
+credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
+`arguments` (optional JSON object passed to the tool, default `{}`; values are
+never echoed in error messages), `timeout` (default `10s`; `0` or unset means
+the default, negative values and values above `60s` are rejected).
+
 Forbidden credential headers: `Authorization`, `Proxy-Authorization`, `Cookie`,
 `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`,
 `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Accept`, `Mcp-Session-Id`,
 `Mcp-Protocol-Version`, `Forwarded`, `X-Real-IP` and `X-Forwarded-*`.
+
+## Credential validation
+
+Without `validate` the authorize form accepts any values, so anyone who can
+reach the server could obtain a token. With a `validate` block, `POST
+/oauth/authorize` checks the entered credentials against the upstream first and
+issues a code only if the upstream accepts them:
+
+```yaml
+upstreams:
+  - name: tn
+    ...
+    validate:
+      tool: get_auth_info   # read-only MCP tool called with the entered credentials
+      # arguments: {}       # optional tool arguments (JSON object)
+      # timeout: 10s        # whole check, default 10s, at most 60s
+```
+
+The check sends these requests to the upstream `url` exactly as configured
+(path and query intact), each carrying the entered credential headers plus
+`Content-Type: application/json`, `Accept: application/json, text/event-stream`
+and a `User-Agent`:
+
+1. `initialize` (protocol `2025-06-18`). A `2xx` with a JSON-RPC result is
+   required. The `Mcp-Session-Id` response header, if any, and the negotiated
+   protocol version are sent as `Mcp-Session-Id` / `Mcp-Protocol-Version` on
+   every later request.
+2. `notifications/initialized`. Any `2xx` is accepted.
+3. `tools/call` with `tool` and `arguments`.
+4. If the upstream issued a session id: a best-effort `DELETE` (2 s limit,
+   errors ignored).
+
+Responses may be `application/json` or `text/event-stream`; for SSE, events
+that are not the response with the request's id (notifications, server
+requests) are skipped. A body larger than 1 MiB is an error.
+
+Outcome:
+
+| Upstream behaviour | Result |
+|---|---|
+| `tools/call` returns a result without `isError` (or `isError: false`) | accepted, code issued |
+| `tools/call` returns `isError: true`, or any step answers HTTP `401`/`403` | rejected: the form is shown again (`400`) with "&lt;Title&gt; rejected these credentials. Check them and try again." |
+| JSON-RPC `error` object (e.g. unknown tool), other non-2xx status, a redirect, transport error, timeout, malformed or oversized body, no response with the matching id | unavailable: the form is shown again (`503`) with "Could not verify the credentials with &lt;Title&gt; right now. Try again later." |
+
+The check fails closed: whenever there is no clear acceptance, no code is
+issued. In both cases non-secret values stay in the form and secret values are
+never re-rendered.
+
+- **Timeout.** `validate.timeout` bounds the whole check, handshake included,
+  and the incoming request's context too.
+- **Concurrency cap.** At most 16 checks run at once across all upstreams; a
+  check that cannot start within its timeout is "unavailable". Waiting for a
+  slot counts toward `validate.timeout`.
+- **Redirects are not followed**, so the credential headers can never be
+  forwarded to another host; a `3xx` answer is "unavailable".
+- **Read-only tool.** The tool runs on every form submission with whatever
+  credentials were typed, so it must not change anything upstream.
+- **Cost.** One upstream round trip (three requests) per submission. The form
+  becomes a credential-validity oracle for anyone who can reach it; the per-IP
+  `oauth.rate_limit.authorize` limit bounds the guessing rate.
+- **Logs.** A rejection is logged at `info` ("credentials rejected by
+  upstream") and an unavailable check at `warn`, with the upstream name, the
+  step and a short reason category (plus the transport error, which may name
+  the upstream host or IP). Credentials, the URL path and query, response
+  bodies and upstream error text are never logged. The `503` carries
+  `Retry-After: 30`.
+
+Tradernet example: `get_auth_info` is read-only and answers a bad API key pair
+with a tool error (`isError: true`) over HTTP `200`, which is why `isError` is
+treated as a rejection (Tradernet never answers `401` for bad keys). It
+verifies only the API key and secret: the optional `X-TN-SID` header is not
+checked by this tool, so a wrong SID is still accepted at connect time.
 
 ## Keys
 

@@ -92,11 +92,37 @@ and the `cred_N` fields are read; the client, redirect and upstream are
 re-validated against the current config, so a revoked redirect or removed
 upstream fails even for an already rendered form. Values are trimmed; a
 required one that is empty, longer than 4 KiB or containing control characters
-re-renders the form (`400`) with a message and without echoing secrets. On
-success the proxy answers `303 See Other` to `redirect_uri?code=...&state=...&iss=...`
+re-renders the form (`400`) with a message and without echoing secrets.
+If the upstream has `validate`, the credentials are then checked against it
+(see Credential validation below); only accepted credentials reach the code
+step. On success the proxy answers `303 See Other` to `redirect_uri?code=...&state=...&iss=...`
 (also for errors found at POST time, so the browser never re-sends the
 credentials; errors found at GET time use `302`). The AS metadata advertises
 `authorization_response_iss_parameter_supported: true` (RFC 9207).
+
+**Credential validation.** Without it the form would accept anything and
+anyone could mint a working token, using the proxy as a relay to the upstream.
+With `validate` configured (internal/oauth/credcheck.go) `authorizeSubmit`
+makes one authenticated MCP exchange before issuing a code: `initialize`,
+`notifications/initialized`, then `tools/call` of the configured read-only
+tool, all with the entered credential headers, and a best-effort `DELETE` when
+the upstream issued a session. Classification: HTTP `401`/`403` at any step or
+a tool result with `isError: true` means rejected (form re-rendered, `400`);
+everything else that is not a clean result (JSON-RPC error, non-2xx, `3xx`,
+transport error, timeout, malformed or over-1-MiB body, no response with the
+matching id) means unavailable (form re-rendered, `503`), so the check fails
+closed. The upstream client never follows redirects (the credential headers
+would travel to the redirect target), the whole check is bounded by
+`validate.timeout` and the request context, and at most 16 checks run
+concurrently (waiting for a slot counts toward `validate.timeout`; the slot is
+released before the best-effort session `DELETE`, which may add up to 2 s to
+the response). The `503` carries `Retry-After`. The credentials, the URL path
+and query, response bodies and upstream error text are never logged; the
+transport error may name the upstream host or IP. The price: one extra upstream round trip per submission, and
+the form becomes a credential-validity oracle for whoever can reach it, bounded
+by the per-IP authorize rate limit. Tokens are thus issued only for
+credentials the upstream accepts. Upstreams without `validate` behave as
+before and are never contacted from the authorize endpoint.
 
 **CSRF.** No cookies or sessions exist, so there is no ambient authority to
 abuse: the only secret in the POST is the credentials the user types, and the
@@ -285,9 +311,10 @@ pruned lazily (at most once a minute, once a second while full).
 - **Lost refresh responses.** A client that loses the response to a refresh
   request (network failure after the server spent the token) holds a spent
   token and must re-authorize.
-- **Cache filling.** Registration is open and the credentials form accepts any
-  values, so anyone can create logins (one code entry each, and one family
-  entry once refreshed). The code cache fails closed when full (503 until
+- **Cache filling.** Registration is open and, for upstreams without
+  `validate`, the credentials form accepts any values (with `validate` each
+  login needs credentials the upstream accepts), so anyone can create logins
+  (one code entry each, and one family entry once refreshed). The code cache fails closed when full (503 until
   codes expire, minutes); the family cache evicts (see Full cache), so
   legitimate users never get 503 from it. The cost of flooding is that reuse
   detection degrades: a chain is evicted once 100,000 newer families have been

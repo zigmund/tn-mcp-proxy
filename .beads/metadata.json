@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tn_mcp_proxy",
+  "project_id": "47f913bb-1949-462a-87f7-5a54dffc96d2"
+}

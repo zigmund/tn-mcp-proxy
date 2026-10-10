@@ -1,15 +1,17 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{.L.Lang}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Authorization error</title>
+<title>{{.L.T "error.title"}}</title>
 <style>{{.CSS}}</style>
 </head>
 <body>
-<h1>Authorization error</h1>
-<div class="box"><p class="err">{{.Message}}</p>
-<p class="hint">Go back to the application and start the connection again.</p></div>
+<main>
+<h1 class="h-err">{{.L.T "error.title"}}</h1>
+<div class="err" role="alert"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg><p>{{.L.Msg .Message}}</p></div>
+<p class="hint">{{.L.T "error.hint"}}</p>
+</main>
 </body>
 </html>

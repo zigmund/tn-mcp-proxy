@@ -10,10 +10,6 @@ import (
 	"github.com/zigmund/tn-mcp-proxy/internal/tokens"
 )
 
-// msgCredsTooLong is the generic form error for credentials that individually
-// pass the per-value limit but together would not fit in a sealed token.
-const msgCredsTooLong = "The credentials together are too long."
-
 // credsFit reports whether creds can be sealed into every token the flow
 // derives from them: the authorization code, the access token and the refresh
 // token. The size is measured with the real encoder (seal.EncodedSize) against

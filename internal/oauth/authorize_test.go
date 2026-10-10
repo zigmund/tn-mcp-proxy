@@ -161,9 +161,9 @@ func TestAuthorizeFormRenders(t *testing.T) {
 		"Connect Tradernet",
 		`type="password"`, `name="cred_0"`, "API key",
 		`name="cred_1"`, "User",
-		"Extra (optional)",
+		"Extra", "(optional)",
 		"self-declared, unverified",
-		"<strong>claude.ai</strong> is requesting access to Tradernet.",
+		`<h1><span class="host">claude.ai</span> is requesting access to Tradernet</h1>`,
 		`action="/oauth/authorize"`,
 	} {
 		if !strings.Contains(body, want) {

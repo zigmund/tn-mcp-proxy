@@ -85,13 +85,16 @@ type authRequest struct {
 type authFailure struct {
 	Status      int // error page status
 	Code        string
-	Description string
+	Description string  // English, for logs and redirect error_description
+	Message     message // what the error page shows, in the page's language
 	RedirectURI string
 	State       string
 }
 
-func pageFailure(status int, msg string) *authFailure {
-	return &authFailure{Status: status, Description: msg}
+// pageFailure is an error page showing the catalog message id.
+func pageFailure(status int, id string, args ...any) *authFailure {
+	m := uiMsg(id, args...)
+	return &authFailure{Status: status, Message: m, Description: newLocale(defaultLang).Msg(m)}
 }
 
 // redirectFailure is only for requests whose client and redirect_uri have
@@ -108,34 +111,57 @@ type formField struct {
 	Value    string // never set for secret fields
 }
 
+// auditNotice is the "What this server logs" panel; nil when audit is off.
+type auditNotice struct {
+	Retention   string
+	Logged      []string // labels of the audited credentials
+	NeverLogged []string // labels of the credentials the server never logs
+}
+
+// formPage is the data of templates/authorize.html. Every user-visible string
+// not from the operator's config or the request is a catalog message resolved
+// through L, never built into the data.
 type formPage struct {
 	CSS           template.CSS
+	L             locale
 	Action        string
 	UpstreamTitle string
 	ClientName    string
 	RedirectHost  string
 	Request       string
 	Fields        []formField
-	Error         string
+	Error         message // zero when there is no banner
+	Audit         *auditNotice
+	Notice        []string // operator notice paragraphs, plain text
+	Contact       string   // visible text of the operator contact
+	ContactHref   string   // mailto: or https: link target
+}
+
+// errorPage is the data of templates/error.html.
+type errorPage struct {
+	CSS     template.CSS
+	L       locale
+	Message message
 }
 
 // handleAuthorize serves GET (render the credentials form) and POST (issue a
 // code). Method filtering is done by the mux patterns. No CORS headers are
 // set: this endpoint is only ever navigated to, never fetched cross-origin.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	l := newLocale(defaultLang) // ld8.48: resolve from the request
 	if s.sealer == nil {
 		s.log.Error("authorization requested without a sealer")
-		s.writeErrorPage(w, http.StatusInternalServerError, "Internal server error.")
+		s.writeErrorPage(w, http.StatusInternalServerError, l, uiMsg(msgInternal))
 		return
 	}
 	var fail *authFailure
 	if r.Method == http.MethodPost {
-		fail = s.authorizeSubmit(w, r)
+		fail = s.authorizeSubmit(w, r, l)
 	} else {
-		fail = s.authorizeForm(w, r)
+		fail = s.authorizeForm(w, r, l)
 	}
 	if fail != nil {
-		s.writeFailure(w, r, fail)
+		s.writeFailure(w, r, l, fail)
 	}
 }
 
@@ -143,11 +169,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 //
 // Order matters: errors found before the client and its redirect_uri are
 // verified go to an error page; only afterwards may errors be redirected.
-func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) *authFailure {
+func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale) *authFailure {
 	q := r.URL.Query()
 	clientID, ok := single(q, "client_id")
 	if !ok || clientID == "" {
-		return pageFailure(http.StatusBadRequest, "The request is missing a valid client_id.")
+		return pageFailure(http.StatusBadRequest, msgClientIDMissing)
 	}
 	c, fail := s.lookupClient(clientID)
 	if fail != nil {
@@ -155,7 +181,7 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) *authFail
 	}
 	redirectURI, ok := single(q, "redirect_uri")
 	if !ok || !s.redirectAllowed(c, redirectURI) {
-		return pageFailure(http.StatusBadRequest, "The redirect_uri is missing or not allowed for this application.")
+		return pageFailure(http.StatusBadRequest, msgRedirectBad)
 	}
 
 	// From here on the client and redirect target are trusted.
@@ -202,9 +228,9 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) *authFail
 	sealed, err := s.sealer.Seal(seal.KindAuthRequest, req, s.now().Add(formTTL))
 	if err != nil {
 		s.log.Error("sealing authorize request", "err", err)
-		return pageFailure(http.StatusInternalServerError, "Internal server error.")
+		return pageFailure(http.StatusInternalServerError, msgInternal)
 	}
-	s.writeForm(w, http.StatusOK, c, up, req, sealed, nil, "")
+	s.writeForm(w, http.StatusOK, l, formArgs{Client: c, Up: up, Req: req, Sealed: sealed})
 	return nil
 }
 
@@ -222,27 +248,27 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) *authFail
 // The sealed field binds all request parameters (and expires), so the POST
 // cannot be steered elsewhere. As defence in depth a browser-declared
 // cross-site POST (Sec-Fetch-Site) is refused.
-func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFailure {
+func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l locale) *authFailure {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		return pageFailure(http.StatusForbidden, "Cross-site form submission is not allowed.")
+		return pageFailure(http.StatusForbidden, msgCrossSite)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAuthorizeBody)
 	if err := r.ParseForm(); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			return pageFailure(http.StatusRequestEntityTooLarge, "The submitted form is too large.")
+			return pageFailure(http.StatusRequestEntityTooLarge, msgFormTooLarge)
 		}
-		return pageFailure(http.StatusBadRequest, "The submitted form is malformed.")
+		return pageFailure(http.StatusBadRequest, msgFormMalformed)
 	}
 	sealed := r.PostForm.Get(requestField)
 	req, err := seal.OpenAs[authRequest](s.sealer, seal.KindAuthRequest, sealed)
 	switch {
 	case err == nil:
 	case errors.Is(err, seal.ErrInvalid), errors.Is(err, seal.ErrExpired):
-		return pageFailure(http.StatusBadRequest, "This authorization request is invalid or has expired.")
+		return pageFailure(http.StatusBadRequest, msgRequestExpired)
 	default:
 		s.log.Error("opening authorize request", "err", err)
-		return pageFailure(http.StatusInternalServerError, "Internal server error.")
+		return pageFailure(http.StatusInternalServerError, msgInternal)
 	}
 
 	c, fail := s.lookupClient(req.ClientID)
@@ -250,7 +276,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return fail
 	}
 	if !s.redirectAllowed(c, req.RedirectURI) {
-		return pageFailure(http.StatusBadRequest, "The redirect_uri is no longer allowed for this application.")
+		return pageFailure(http.StatusBadRequest, msgRedirectGone)
 	}
 	up, ok := s.upstreamByName(req.Upstream)
 	if !ok || !validChallenge(req.CodeChallenge) {
@@ -258,14 +284,14 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	}
 
 	creds, values, msg := collectCreds(up, r.PostForm)
-	if msg != "" {
-		s.writeForm(w, http.StatusBadRequest, c, up, req, sealed, values, msg)
+	if msg.ID != "" {
+		s.writeForm(w, http.StatusBadRequest, l, formArgs{c, up, req, sealed, values, msg})
 		return nil
 	}
 
 	// Before any upstream call and before sealing: input too long for a token.
 	if !credsFit(up, req, creds) {
-		s.writeForm(w, http.StatusBadRequest, c, up, req, sealed, values, msgCredsTooLong)
+		s.writeForm(w, http.StatusBadRequest, l, formArgs{c, up, req, sealed, values, uiMsg(msgCredsTooLong)})
 		return nil
 	}
 
@@ -274,15 +300,15 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	if !up.CredsAllowed(creds) {
 		s.log.Info("authorize refused: credentials not in allowed_values",
 			append([]any{"upstream", up.Name}, s.audit.Who(s.clientIP(r), up, creds)...)...)
-		s.writeForm(w, http.StatusBadRequest, c, up, req, sealed, values, s.rejectedMsg(up))
+		s.writeForm(w, http.StatusBadRequest, l, formArgs{c, up, req, sealed, values, rejectedMessage(up)})
 		return nil
 	}
 
-	if msg, status := s.validateCreds(r.Context(), up, creds, s.audit.Who(s.clientIP(r), up, creds)); msg != "" {
+	if msg, status := s.validateCreds(r.Context(), up, creds, s.audit.Who(s.clientIP(r), up, creds)); msg.ID != "" {
 		if status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", retryAfterUnavailable)
 		}
-		s.writeForm(w, status, c, up, req, sealed, values, msg)
+		s.writeForm(w, status, l, formArgs{c, up, req, sealed, values, msg})
 		return nil
 	}
 
@@ -290,7 +316,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	// global ceiling (it bounds live codes); everything above is bounded by the
 	// per-IP limits charged up front.
 	if !s.chargeGlobalAuthorize(w) {
-		return pageFailure(http.StatusTooManyRequests, "Too many requests. Please wait a moment and try again.")
+		return pageFailure(http.StatusTooManyRequests, msgTooManyRequests)
 	}
 
 	jti, err := newID()
@@ -325,7 +351,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		slog.String("redirect_host", redirectHost(req.RedirectURI)),
 		s.audit.Creds(up, creds),
 	)
-	s.redirect(w, r, req.RedirectURI, req.State, url.Values{"code": {code}})
+	s.redirect(w, r, l, req.RedirectURI, req.State, url.Values{"code": {code}})
 	return nil
 }
 
@@ -342,20 +368,19 @@ func redirectHost(uri string) string {
 // message and status (400 rejected, 503 no verdict, so the check fails closed).
 // who is the audit identification (client IP and audited values) for the
 // refusal log line; nil when audit is off.
-func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds map[string]string, who []any) (msg string, status int) {
+func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds map[string]string, who []any) (msg message, status int) {
 	if up.Validate == nil {
-		return "", 0
+		return message{}, 0
 	}
 	err := s.checker.Check(ctx, up, creds)
 	if err == nil {
-		return "", 0
+		return message{}, 0
 	}
 	logCheck(s.log, up.Name, err, who...)
-	title := upstreamTitle(up)
 	if errors.Is(err, credcheck.ErrRejected) {
-		return s.rejectedMsg(up), http.StatusBadRequest
+		return rejectedMessage(up), http.StatusBadRequest
 	}
-	return "Could not verify the credentials with " + title + " right now. Try again later.", http.StatusServiceUnavailable
+	return uiMsg(msgCredsNoVerdict, upstreamTitle(up)), http.StatusServiceUnavailable
 }
 
 func upstreamTitle(up config.Upstream) string {
@@ -365,9 +390,9 @@ func upstreamTitle(up config.Upstream) string {
 	return up.Title
 }
 
-// rejectedMsg is the form error for credentials that must not get a token.
-func (s *Server) rejectedMsg(up config.Upstream) string {
-	return upstreamTitle(up) + " rejected these credentials. Check them and try again."
+// rejectedMessage is the form error for credentials that must not get a token.
+func rejectedMessage(up config.Upstream) message {
+	return uiMsg(msgCredsRejected, upstreamTitle(up))
 }
 
 // lookupClient opens a client_id, mapping failures to page failures.
@@ -377,10 +402,10 @@ func (s *Server) lookupClient(clientID string) (client, *authFailure) {
 	case err == nil:
 		return c, nil
 	case errors.Is(err, errInvalidClient):
-		return client{}, pageFailure(http.StatusBadRequest, "The client_id is not recognized. Register the application again.")
+		return client{}, pageFailure(http.StatusBadRequest, msgClientUnknown)
 	default:
 		s.log.Error("opening client id", "err", err)
-		return client{}, pageFailure(http.StatusInternalServerError, "Internal server error.")
+		return client{}, pageFailure(http.StatusInternalServerError, msgInternal)
 	}
 }
 
@@ -414,7 +439,7 @@ func (s *Server) upstreamByName(name string) (config.Upstream, bool) {
 // collectCreds reads the credential fields of up from form. It returns the
 // header->value map, the non-secret values for re-rendering, and a user-facing
 // message when validation fails (the message never contains a value).
-func collectCreds(up config.Upstream, form url.Values) (creds, values map[string]string, msg string) {
+func collectCreds(up config.Upstream, form url.Values) (creds, values map[string]string, msg message) {
 	creds = make(map[string]string, len(up.Credentials))
 	values = make(map[string]string, len(up.Credentials))
 	for i, cr := range up.Credentials {
@@ -427,18 +452,18 @@ func collectCreds(up config.Upstream, form url.Values) (creds, values map[string
 		case v == "" && cr.Optional:
 			continue
 		case v == "":
-			msg = credLabel(cr) + " is required."
+			msg = uiMsg(msgCredRequired, credLabel(cr))
 		case len(v) > maxCredLen:
-			msg = credLabel(cr) + " is too long."
+			msg = uiMsg(msgCredTooLong, credLabel(cr))
 		case !validCredValue(v):
-			msg = credLabel(cr) + " contains invalid characters."
+			msg = uiMsg(msgCredInvalid, credLabel(cr))
 		}
-		if msg != "" {
+		if msg.ID != "" {
 			return nil, values, msg
 		}
 		creds[http.CanonicalHeaderKey(cr.Header)] = v
 	}
-	return creds, values, ""
+	return creds, values, message{}
 }
 
 // validCredValue rejects control characters (header injection) and invalid UTF-8.
@@ -463,8 +488,20 @@ func credLabel(cr config.Credential) string {
 	return cr.Header
 }
 
+// formArgs is what writeForm renders: who asks, for which upstream, the sealed
+// request, the non-secret values to refill, and the banner (zero for none).
+type formArgs struct {
+	Client client
+	Up     config.Upstream
+	Req    authRequest
+	Sealed string
+	Values map[string]string
+	Msg    message
+}
+
 // writeForm renders the credentials form with the security headers.
-func (s *Server) writeForm(w http.ResponseWriter, status int, c client, up config.Upstream, req authRequest, sealed string, values map[string]string, msg string) {
+func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formArgs) {
+	c, up, req, sealed, values, msg := a.Client, a.Up, a.Req, a.Sealed, a.Values, a.Msg
 	fields := make([]formField, len(up.Credentials))
 	for i, cr := range up.Credentials {
 		id := credFieldID(i)
@@ -484,8 +521,10 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, c client, up confi
 			formAction += " " + u.Scheme + "://" + u.Host
 		}
 	}
-	s.renderPage(w, status, formAction, authorizeTmpl, formPage{
+	page := s.cfg.OAuth.Page
+	data := formPage{
 		CSS:           template.CSS(styleCSS),
+		L:             l,
 		Action:        PathAuthorize,
 		UpstreamTitle: title,
 		ClientName:    c.Name,
@@ -493,7 +532,18 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, c client, up confi
 		Request:       sealed,
 		Fields:        fields,
 		Error:         msg,
-	})
+		Notice:        page.NoticeParagraphs(l.Lang()),
+		Contact:       page.ContactText(),
+		ContactHref:   page.ContactHref(),
+	}
+	if s.cfg.Audit.Enabled {
+		data.Audit = &auditNotice{
+			Retention:   s.cfg.Audit.Retention,
+			Logged:      up.AuditedLabels(),
+			NeverLogged: up.NeverLoggedLabels(),
+		}
+	}
+	s.renderPage(w, status, formAction, authorizeTmpl, data)
 }
 
 // renderPage executes tmpl into a buffer first, so a template error yields a
@@ -522,34 +572,33 @@ func setPageHeaders(w http.ResponseWriter, formAction string) {
 		"; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'")
 }
 
-func (s *Server) writeErrorPage(w http.ResponseWriter, status int, msg string) {
-	s.renderPage(w, status, "'none'", errorTmpl, struct {
-		CSS     template.CSS
-		Message string
-	}{template.CSS(styleCSS), msg})
+func (s *Server) writeErrorPage(w http.ResponseWriter, status int, l locale, m message) {
+	s.renderPage(w, status, "'none'", errorTmpl, errorPage{
+		CSS: template.CSS(styleCSS), L: l, Message: m,
+	})
 }
 
 // writeFailure renders an error page or redirects the error to the client.
-func (s *Server) writeFailure(w http.ResponseWriter, r *http.Request, f *authFailure) {
+func (s *Server) writeFailure(w http.ResponseWriter, r *http.Request, l locale, f *authFailure) {
 	if f.RedirectURI == "" {
 		if f.Status >= 500 {
 			s.log.Warn("authorize request failed", "status", f.Status)
 		} else {
 			s.log.Debug("authorize request rejected", "reason", f.Description)
 		}
-		s.writeErrorPage(w, f.Status, f.Description)
+		s.writeErrorPage(w, f.Status, l, f.Message)
 		return
 	}
 	s.log.Debug("authorize request rejected", "error", f.Code, "reason", f.Description)
-	s.redirect(w, r, f.RedirectURI, f.State, url.Values{"error": {f.Code}, "error_description": {f.Description}})
+	s.redirect(w, r, l, f.RedirectURI, f.State, url.Values{"error": {f.Code}, "error_description": {f.Description}})
 }
 
 // redirect sends the user agent to the (already verified) redirect URI with
 // params, state (when present) and the issuer (RFC 9207).
-func (s *Server) redirect(w http.ResponseWriter, r *http.Request, redirectURI, state string, params url.Values) {
+func (s *Server) redirect(w http.ResponseWriter, r *http.Request, l locale, redirectURI, state string, params url.Values) {
 	u, err := url.Parse(redirectURI)
 	if err != nil { // unreachable: it is allowlisted config
-		s.writeErrorPage(w, http.StatusInternalServerError, "Internal server error.")
+		s.writeErrorPage(w, http.StatusInternalServerError, l, uiMsg(msgInternal))
 		return
 	}
 	q := u.Query()

@@ -24,7 +24,7 @@ func TestAuthorizeOverBudgetCredentialsGetFormError(t *testing.T) {
 	rec := e.post(form)
 	mustPage(t, rec, http.StatusBadRequest)
 	body := rec.Body.String()
-	if !strings.Contains(body, msgCredsTooLong) {
+	if !strings.Contains(body, en(msgCredsTooLong)) {
 		t.Errorf("no form error in:\n%s", body)
 	}
 	if strings.Contains(body, long[:100]) {
@@ -105,7 +105,7 @@ func TestAuthorizeMaxCredentialsRoundTrip(t *testing.T) {
 		"cred_0":     {strings.Repeat("a", maxCredLen)}, "cred_1": {strings.Repeat("a", maxCredLen)}, "cred_2": {strings.Repeat("a", n+1)},
 	})
 	mustPage(t, rec, http.StatusBadRequest)
-	if !strings.Contains(rec.Body.String(), msgCredsTooLong) {
+	if !strings.Contains(rec.Body.String(), en(msgCredsTooLong)) {
 		t.Error("over-budget input not rejected with a form error")
 	}
 }

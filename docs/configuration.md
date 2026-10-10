@@ -166,7 +166,11 @@ the proxy's. The body must be valid UTF-8 JSON (only space, tab, CR and LF may
 surround it; a byte order mark or UTF-16 is refused) and a single object or a
 non-empty array of objects; otherwise the answer is 400 with `-32700 Parse
 error`. The structural keys `method`, `params` and `arguments` are matched
-exactly (case-sensitively); a duplicate `method` or `params` in any message, a
+exactly (case-sensitively), and a key in any message, or in the `params` of a
+`tools/call`, that is not exactly `method`, `params` or `arguments` but equals
+one under case folding (`METHOD`, `Params`, `paramſ`) is refused with `-32600
+Invalid Request`, in single messages and batch elements alike; a duplicate
+`method` or `params` in any message, a
 duplicate `arguments` in a `tools/call`, or a `method` that is not a string,
 gets 400 with `-32600 Invalid Request`. Argument names are
 matched case-insensitively. Methods other than `tools/call` pass once the body
@@ -562,8 +566,9 @@ This differs from `oauth.rate_limit`, which only has the all-or-nothing
   in-flight cap is what actually binds.
 - **Body cap.** 10 MiB stays the default: upstreams such as Tradernet expose
   file-upload tools whose payload is base64 inside the JSON-RPC body, so a
-  smaller default could break real calls. Bodies are streamed, not buffered,
-  and the caps above bound how many can be in flight. Lower it if your
+  smaller default could break real calls. Bodies are streamed, except on an upstream with
+  `forbidden_arguments`, where each POST body is read whole into memory before
+  it is forwarded; the caps above bound how many can be in flight. Lower it if your
   upstream takes only small messages.
 - **Logs.** A refusal is logged at `debug` (client IP only for the per-IP
   limit) and, at most once a minute per limit, at `warn` as a count

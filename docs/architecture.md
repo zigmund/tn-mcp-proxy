@@ -42,7 +42,68 @@ Details of register, authorize and token are documented as those endpoints land.
 
 ## Proxying
 
-_To be written._
+Each upstream gets one handler (`proxy.New`) mounted at its `path`.
+
+**Request path.** Only the exact `path` is served; anything else (sub-paths,
+encoded or unclean variants such as `%2f` or `//`) gets 404 and never reaches
+the upstream. A request with an `Upgrade` header gets 400. Otherwise the
+request is authenticated and then sent by `httputil.ReverseProxy` to the
+upstream `url` exactly, with its path and escaping untouched. The client's
+query string is forwarded only if the upstream `url` has no query of its own;
+otherwise the configured query is used as is. Any method passes through (POST,
+GET for the SSE stream, DELETE for session end). The request body is capped at
+10 MiB (413 beyond that).
+
+**Auth.** `Authorization: Bearer <token>` (scheme case-insensitive) is opened
+as a `seal.KindAccess` token into `tokens.Access`. Checks: authentic and
+unexpired, `Upstream` equals the upstream name, every non-optional credential
+header present in the token (values with CR/LF/NUL are rejected; the log names
+only the header). Only headers configured for the upstream are injected;
+extras in the token are ignored. A payload that does not decode (for example
+after a deploy changed its shape) is logged at error level and answered like
+any invalid token, so the client re-authorizes.
+
+**Header handling.** `Authorization`, `Cookie`, `Proxy-Authorization`,
+`X-Real-IP`, all `X-Forwarded-*` and `Forwarded` are stripped from the inbound
+request, as is every configured credential header (including optional ones),
+and then the token's credentials are set. Credentials are applied after
+`ReverseProxy` removes hop-by-hop headers, so a `Connection:` header cannot
+drop them. Client IPs are never forwarded (`SetXForwarded` is not used).
+`Host` is the upstream host. Everything else passes through, notably
+`Mcp-Session-Id`, `Mcp-Protocol-Version`, `Accept`, `Content-Type`,
+`Last-Event-ID`, `Origin` and `Referer`. `Set-Cookie` is stripped from
+responses.
+
+**Streaming and timeouts.** `FlushInterval: -1` flushes every write, so SSE
+events reach the client immediately. The upstream transport has no overall
+timeout and no response header timeout (slow tool calls and idle streams are
+legitimate); only dial (10s) and TLS handshake (10s) are bounded, with 30s
+keepalive and up to 64 idle connections per host. Compression is not
+negotiated or touched by the proxy: bytes pass through opaquely. A client
+disconnect cancels the upstream request through the request context.
+
+**Upstream 401.** If the upstream answers 401 (the stored credentials were
+revoked or are wrong), its `WWW-Authenticate` is replaced with
+`Bearer error="invalid_token", error_description="upstream rejected credentials", resource_metadata="..."`
+and a warning is logged. claude.ai then re-runs authorization and the user can
+enter new keys.
+
+**Errors.**
+
+| Status | When | `WWW-Authenticate` |
+|--------|------|--------------------|
+| 400 | `Upgrade` header present | none |
+| 401 | no Bearer token | `Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource<path>"` |
+| 401 | invalid, expired, wrong kind, wrong upstream, bad payload, missing credentials, or upstream 401 | `Bearer error="invalid_token", error_description="...", resource_metadata="..."` |
+| 404 | path is not exactly `path` | none |
+| 413 | request body over 10 MiB | none |
+| 500 | the sealer itself is broken (server bug) | none |
+| 502 | upstream unreachable or failed (logged at warn) | none |
+| 504 | upstream timeout (logged at warn) | none |
+
+A client that disconnects mid-request gets no response (logged at debug).
+Tokens and credentials are never logged. Debug logs carry only the upstream
+name and response status.
 
 ## Token sealing
 

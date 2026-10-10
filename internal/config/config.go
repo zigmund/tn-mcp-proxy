@@ -29,6 +29,7 @@ const (
 	DefaultLogFormat       = "json"
 	DefaultAccessTokenTTL  = time.Hour
 	DefaultRefreshTokenTTL = 720 * time.Hour
+	DefaultMaxSessionTTL   = 2160 * time.Hour // 90 days
 	DefaultCodeTTL         = 5 * time.Minute
 	DefaultReloadInterval  = time.Minute
 
@@ -150,6 +151,7 @@ func (Secrets) MarshalYAML() (any, error) { return redacted, nil }
 type OAuth struct {
 	AccessTokenTTL      time.Duration `yaml:"access_token_ttl"`
 	RefreshTokenTTL     time.Duration `yaml:"refresh_token_ttl"`
+	MaxSessionTTL       time.Duration `yaml:"max_session_ttl"` // absolute lifetime of a refresh chain, counted from the code exchange
 	CodeTTL             time.Duration `yaml:"code_ttl"`
 	AllowedRedirectURIs []string      `yaml:"allowed_redirect_uris"`
 	RateLimit           RateLimit     `yaml:"rate_limit"`
@@ -330,6 +332,9 @@ func (c *Config) applyDefaults() {
 	if c.OAuth.RefreshTokenTTL == 0 {
 		c.OAuth.RefreshTokenTTL = DefaultRefreshTokenTTL
 	}
+	if c.OAuth.MaxSessionTTL == 0 {
+		c.OAuth.MaxSessionTTL = DefaultMaxSessionTTL
+	}
 	if c.OAuth.CodeTTL == 0 {
 		c.OAuth.CodeTTL = DefaultCodeTTL
 	}
@@ -453,6 +458,7 @@ func (c *Config) validate() []error {
 	}{
 		{"oauth.access_token_ttl", c.OAuth.AccessTokenTTL},
 		{"oauth.refresh_token_ttl", c.OAuth.RefreshTokenTTL},
+		{"oauth.max_session_ttl", c.OAuth.MaxSessionTTL},
 		{"oauth.code_ttl", c.OAuth.CodeTTL},
 	} {
 		if d.v <= 0 {

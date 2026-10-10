@@ -29,6 +29,14 @@ type Access struct {
 // redeemed Gen per Family in an in-memory cache until Exp; presenting a Gen
 // that is not newer revokes the whole family. The cache is per-process, so a
 // restart forgets it.
+//
+// Start is the unix time of the original login (the code exchange) and is
+// copied unchanged on every rotation. Exp slides with each refresh, but the
+// token endpoint caps it, and refuses the chain, at Start plus
+// oauth.max_session_ttl, so a chain cannot be kept alive forever. Start == 0
+// marks a token issued before the field existed; the token endpoint treats
+// the moment of its next refresh as the start of the chain (one-time
+// migration).
 type Refresh struct {
 	Upstream string            `json:"u"` // upstream name
 	ClientID string            `json:"c"` // DCR client_id the token was issued to
@@ -36,6 +44,7 @@ type Refresh struct {
 	Family   string            `json:"f"` // random chain id
 	Gen      int64             `json:"g"` // generation within the chain, starting at 0
 	Exp      int64             `json:"e"` // expiry, unix seconds (mirrors the seal envelope; bounds the cache entry)
+	Start    int64             `json:"s"` // login time, unix seconds; constant across the chain, 0 for legacy tokens
 }
 
 // Code is the payload of an authorization code (seal.KindCode). The code

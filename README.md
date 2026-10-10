@@ -38,7 +38,7 @@ Who sees what:
 | tn-mcp-proxy | in memory, per request; never stored or logged | opens it with keys from your config |
 | Tradernet MCP | in the `X-TN-*` headers, as with a direct call | - |
 
-The token is a bearer secret: whoever holds it can use it until it expires.
+The token is a bearer secret: whoever holds it can use it until it expires (access tokens: `oauth.access_token_ttl`; a refresh chain: its idle expiry or `oauth.max_session_ttl`, whichever comes first, and nothing is revoked when a connector is disconnected).
 A TLS-terminating reverse proxy in front of tn-mcp-proxy also sees the plain
 keys while you submit the authorization form.
 
@@ -198,8 +198,10 @@ returns. Credentials are handled as described above.
    (`umask 077` makes the new file `0600` from the start.)
 2. The first key seals new tokens; all listed keys still open existing ones, so
    no one is logged out. Every refresh issues a new refresh token with a fresh (sliding)
-   `refresh_token_ttl`, so active connectors migrate to the new key by themselves.
-3. After `oauth.refresh_token_ttl` (default 720h = 30 days) no token sealed
+   `refresh_token_ttl` (capped at `oauth.max_session_ttl` from the original login), so
+   active connectors migrate to the new key by themselves.
+3. After `oauth.refresh_token_ttl` (default 720h = 30 days; logins older than
+   `oauth.max_session_ttl`, default 90 days, are cut off earlier) no token sealed
    with the old key is still valid. Remove the old key and restart. Registered client
    ids sealed with the old key become invalid too; claude.ai re-registers
    automatically (reconnect the connector if it does not). Connectors idle for
@@ -229,6 +231,8 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   again (its family is forgotten) for up to `oauth.refresh_token_ttl`. Avoid
   casual restarts after a suspected token leak; rotate keys instead (above).
 - Refresh tokens are single-use and rotated on every refresh; presenting an already used one revokes its whole chain (the user reconnects).
+- A login has an absolute lifetime: refreshing slides the expiry by `oauth.refresh_token_ttl`, but never past `oauth.max_session_ttl` (default 2160h = 90 days) from the original login, after which the user reconnects. Upgrade note: refresh tokens issued before this limit existed get a fresh `max_session_ttl` window at their first refresh.
+- Disconnecting a connector in claude.ai or ChatGPT does not revoke anything on the proxy (there is no revocation endpoint). Its refresh chain stays valid until the `oauth.refresh_token_ttl` idle expiry or `oauth.max_session_ttl`, whichever comes first. To cut everyone off, rotate the token keys and remove the old one.
 - Redirect URIs are restricted to `oauth.allowed_redirect_uris` (claude.ai, claude.com and ChatGPT callbacks by default; ChatGPT's stable callback relies on the RFC 9207 `iss` parameter the proxy returns).
 - `POST /oauth/register`, `/oauth/authorize` and `/oauth/token` are rate limited by the app itself (generous defaults, `oauth.rate_limit`; excess requests get 429 with `Retry-After`). IPv4 clients are limited per address; IPv6 clients per `/64`, `/56` and `/48` (a request must fit all three budgets), so rotating `/64`s inside a routed prefix does not multiply the allowance. `POST /oauth/authorize` additionally has a global ceiling derived from the code cache size and `oauth.code_ttl` (2 500 per minute by default), so the authorization-code cache cannot fill; if it still did, it fails closed with 503. Revoked refresh families are kept in a separate bounded set until their expiry, outside the LRU that attacker-created families can churn: a revoked chain is not re-opened by cache pressure. The active-family cache evicts the least recently used chains when full, at the cost that reuse detection is lost for evicted chains (they just refresh as a new family; nothing locks out). If the revocation set itself ever fills (about a million live revocations), unknown families (new logins, and active chains already evicted from the LRU) are refused with 503 on refresh rather than risking a revoked one; chains still in the LRU keep refreshing. The client IP honours `X-Forwarded-For` only from `trusted_proxies` (loopback by default); add your CDN or load balancer there. A reverse-proxy `limit_req` (the nginx snippet has one) is an optional extra layer. Details and the attacker cost are in [docs/architecture.md](docs/architecture.md). See [docs/configuration.md](docs/configuration.md#rate-limiting).
 - Tokens, credentials and query strings are never logged.

@@ -28,6 +28,8 @@ secrets:
 oauth:
   access_token_ttl: 1h
   refresh_token_ttl: 720h
+  # Absolute lifetime of a login from the code exchange; refreshing never extends it.
+  # max_session_ttl: 2160h
   code_ttl: 5m
   allowed_redirect_uris:
     - https://claude.ai/api/mcp/auth_callback

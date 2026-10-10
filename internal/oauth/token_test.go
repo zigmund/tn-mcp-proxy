@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -695,4 +696,203 @@ func TestTokenRefreshRevocationSetFull(t *testing.T) {
 	e.srv.families.revs = newRevocationSet(1)
 	e.srv.families.revs.add(1, fixedNow.Add(24*time.Hour), fixedNow)
 	e.wantErr(t, e.do(e.refreshForm(e.none, g0)), 503, "server_error")
+}
+
+// refreshPayload opens a refresh token issued by e.
+func (e *tkEnv) refreshPayload(t *testing.T, rt string) tokens.Refresh {
+	t.Helper()
+	r, err := seal.OpenAs[tokens.Refresh](e.srv.sealer, seal.KindRefresh, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestTokenSessionStartPreserved(t *testing.T) {
+	e := newTK(t)
+	_, rt := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
+	start := e.refreshPayload(t, rt).Start
+	if start != fixedNow.Unix() {
+		t.Fatalf("Start = %d, want %d", start, fixedNow.Unix())
+	}
+	for i := 0; i < 3; i++ {
+		e.now.Add(int64(24 * 3600))
+		_, rt = e.wantOK(t, e.do(e.refreshForm(e.none, rt)))
+		if got := e.refreshPayload(t, rt).Start; got != start {
+			t.Fatalf("rotation %d: Start = %d, want %d", i, got, start)
+		}
+	}
+}
+
+func TestTokenSessionLifetimeExceeded(t *testing.T) {
+	e := newTK(t)
+	e.cfg.OAuth.MaxSessionTTL = 100 * time.Hour
+	_, rt := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
+	// Slide the chain forward within the window.
+	e.now.Add(int64(90 * 3600))
+	_, rt = e.wantOK(t, e.do(e.refreshForm(e.none, rt)))
+	// Exactly at session end: rejected, though refresh_token_ttl (720h) is not.
+	e.now.Add(int64(10 * 3600))
+	e.wantErr(t, e.do(e.refreshForm(e.none, rt)), 400, "invalid_grant")
+}
+
+func TestTokenSessionExpiryCapped(t *testing.T) {
+	e := newTK(t)
+	e.cfg.OAuth.MaxSessionTTL = 100 * time.Hour
+	_, rt := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
+	end := fixedNow.Unix() + 100*3600
+
+	// 99.5h in: 30 minutes of session left, less than the 1h access TTL.
+	e.now.Add(int64(99*3600 + 1800))
+	rec := e.do(e.refreshForm(e.none, rt))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
+	}
+	m := decodeTK(t, rec)
+	if m["expires_in"] != float64(1800) {
+		t.Errorf("expires_in = %v, want 1800", m["expires_in"])
+	}
+	rt2, _ := m["refresh_token"].(string)
+	r := e.refreshPayload(t, rt2)
+	if r.Exp != end {
+		t.Errorf("refresh Exp = %d, want session end %d", r.Exp, end)
+	}
+	// The seal envelope expires with the session as well.
+	e.now.Add(1800)
+	e.wantErr(t, e.do(e.refreshForm(e.none, rt2)), 400, "invalid_grant")
+	acc, _ := m["access_token"].(string)
+	e.now.Store(end - 1)
+	if _, err := seal.OpenAs[tokens.Access](e.srv.sealer, seal.KindAccess, acc); err != nil {
+		t.Errorf("access token must be valid until session end: %v", err)
+	}
+	e.now.Store(end)
+	if _, err := seal.OpenAs[tokens.Access](e.srv.sealer, seal.KindAccess, acc); err == nil {
+		t.Error("access token must expire at session end")
+	}
+}
+
+func TestTokenSessionLegacyRefreshMigrates(t *testing.T) {
+	e := newTK(t)
+	e.cfg.OAuth.MaxSessionTTL = 100 * time.Hour
+	exp := time.Unix(e.now.Load(), 0).Add(time.Hour)
+	legacy, err := e.srv.sealer.Seal(seal.KindRefresh, tokens.Refresh{
+		Upstream: "tn", ClientID: e.none, Creds: map[string]string{"X-Api-Key": "sekret"},
+		Family: "legacy", Exp: exp.Unix(), // no Start
+	}, exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rt := e.wantOK(t, e.do(e.refreshForm(e.none, legacy)))
+	if got := e.refreshPayload(t, rt).Start; got != fixedNow.Unix() {
+		t.Fatalf("migrated Start = %d, want now (%d)", got, fixedNow.Unix())
+	}
+	// The migrated chain is now bounded.
+	e.now.Add(int64(100 * 3600))
+	e.wantErr(t, e.do(e.refreshForm(e.none, rt)), 400, "invalid_grant")
+}
+
+func TestTokenSessionNegativeStartRejected(t *testing.T) {
+	e := newTK(t)
+	exp := time.Unix(e.now.Load(), 0).Add(time.Hour)
+	bad, err := e.srv.sealer.Seal(seal.KindRefresh, tokens.Refresh{
+		Upstream: "tn", ClientID: e.none, Creds: map[string]string{"X-Api-Key": "sekret"},
+		Family: "neg", Exp: exp.Unix(), Start: -5,
+	}, exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.wantErr(t, e.do(e.refreshForm(e.none, bad)), 400, "invalid_grant")
+}
+
+// sealRefresh seals r as a refresh token expiring at r.Exp.
+func (e *tkEnv) sealRefresh(t *testing.T, r tokens.Refresh) string {
+	t.Helper()
+	s, err := e.srv.sealer.Seal(seal.KindRefresh, r, time.Unix(r.Exp, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestTokenSessionSubSecondEnd(t *testing.T) {
+	e := newTK(t)
+	e.cfg.OAuth.MaxSessionTTL = 100 * time.Hour
+	_, rt := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
+	end := fixedNow.Unix() + 100*3600
+	// The server clock carries sub-second precision, the sealer's does not.
+	e.srv.now = func() time.Time { return time.Unix(end-1, 500_000_000) }
+	e.now.Store(end - 1)
+	rec := e.do(e.refreshForm(e.none, rt))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
+	}
+	if got, _ := decodeTK(t, rec)["expires_in"].(float64); got < 1 {
+		t.Errorf("expires_in = %v, want >= 1", got)
+	}
+}
+
+func TestTokenSessionBoundary(t *testing.T) {
+	e := newTK(t)
+	e.cfg.OAuth.MaxSessionTTL = 100 * time.Hour
+	_, rt := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
+	e.now.Add(100*3600 - 1) // one second before the session end
+	rec := e.do(e.refreshForm(e.none, rt))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
+	}
+	if got := decodeTK(t, rec)["expires_in"]; got != float64(1) {
+		t.Errorf("expires_in = %v, want 1", got)
+	}
+}
+
+func TestTokenSessionStartRange(t *testing.T) {
+	e := newTK(t)
+	now := e.now.Load()
+	seed := func(fam string, start int64) string {
+		return e.sealRefresh(t, tokens.Refresh{
+			Upstream: "tn", ClientID: e.none, Creds: map[string]string{"X-Api-Key": "sekret"},
+			Family: fam, Exp: now + 3600, Start: start,
+		})
+	}
+	e.wantErr(t, e.do(e.refreshForm(e.none, seed("far", now+6*60))), 400, "invalid_grant")
+	e.wantErr(t, e.do(e.refreshForm(e.none, seed("max", math.MaxInt64-10))), 400, "invalid_grant")
+	_, rt := e.wantOK(t, e.do(e.refreshForm(e.none, seed("skew", now+4*60))))
+	if got := e.refreshPayload(t, rt).Start; got != now+4*60 {
+		t.Errorf("Start = %d, want it preserved", got)
+	}
+}
+
+func TestTokenSessionKeepsLongerCacheEntry(t *testing.T) {
+	e := newTK(t)
+	e.cfg.OAuth.MaxSessionTTL = 100 * time.Hour
+	now := e.now.Load()
+	oldExp := now + 500*3600 // as if refresh_token_ttl was larger when issued
+	rt := e.sealRefresh(t, tokens.Refresh{
+		Upstream: "tn", ClientID: e.none, Creds: map[string]string{"X-Api-Key": "sekret"},
+		Family: "longer", Exp: oldExp, Start: now,
+	})
+	_, rt2 := e.wantOK(t, e.do(e.refreshForm(e.none, rt)))
+	if got := e.refreshPayload(t, rt2).Exp; got != now+100*3600 {
+		t.Fatalf("new token Exp = %d, want capped %d", got, now+100*3600)
+	}
+	c := e.srv.families
+	c.mu.Lock()
+	f := c.seen["longer"]
+	c.mu.Unlock()
+	if f == nil || f.exp.Unix() != oldExp {
+		t.Errorf("cache entry exp = %v, want the old Exp %d", f, oldExp)
+	}
+}
+
+func TestTokenSessionLegacyReplayRevokes(t *testing.T) {
+	e := newTK(t)
+	now := e.now.Load()
+	legacy := e.sealRefresh(t, tokens.Refresh{
+		Upstream: "tn", ClientID: e.none, Creds: map[string]string{"X-Api-Key": "sekret"},
+		Family: "legacy-replay", Exp: now + 3600,
+	})
+	_, rt := e.wantOK(t, e.do(e.refreshForm(e.none, legacy)))
+	e.wantErr(t, e.do(e.refreshForm(e.none, legacy)), 400, "invalid_grant")
+	// Reuse revoked the whole family, including the migrated chain.
+	e.wantErr(t, e.do(e.refreshForm(e.none, rt)), 400, "invalid_grant")
 }

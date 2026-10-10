@@ -36,11 +36,11 @@ func TestJSONKeys(t *testing.T) {
 	if got, want := string(b), `{"u":"tn","c":"c","h":{"X-K":"v"}}`; got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}
-	b, err = json.Marshal(Refresh{Upstream: "tn", ClientID: "c", Creds: map[string]string{"X-K": "v"}, Family: "f", Gen: 2, Exp: 7})
+	b, err = json.Marshal(Refresh{Upstream: "tn", ClientID: "c", Creds: map[string]string{"X-K": "v"}, Family: "f", Gen: 2, Exp: 7, Start: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(b), `{"u":"tn","c":"c","h":{"X-K":"v"},"f":"f","g":2,"e":7}`; got != want {
+	if got, want := string(b), `{"u":"tn","c":"c","h":{"X-K":"v"},"f":"f","g":2,"e":7,"s":3}`; got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}
 }

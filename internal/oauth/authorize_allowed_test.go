@@ -77,6 +77,8 @@ func TestRefreshAllowedValues(t *testing.T) {
 
 func TestAuthorizeAllowedRefusalIndistinguishable(t *testing.T) {
 	norm := func(s string) string {
+		// The sealed request and the switcher links (which carry the per-env client_id) differ by nonce.
+		s = regexp.MustCompile(`(?s)<nav class="lang".*?</nav>`).ReplaceAllString(s, "")
 		return regexp.MustCompile(`name="request" value="[^"]*"`).ReplaceAllString(s, `name="request" value=""`)
 	}
 	post := func(mod func(*config.Upstream)) *httptest.ResponseRecorder {

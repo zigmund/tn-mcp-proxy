@@ -8,36 +8,47 @@
 <style>{{.CSS}}</style>
 </head>
 <body>
-<main>
+{{with .LangLinks}}<nav class="lang" aria-label="{{$.L.T "lang.nav_label"}}">{{range .}}<a href="{{.URL}}" lang="{{.Code}}" hreflang="{{.Code}}"{{if .Current}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
+{{end}}<main>
 <div class="req">
 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9.5 12l2 2 3.5-4"/></svg>
 <h1><span class="host">{{.RedirectHost}}</span> {{.L.T "page.request_tail" .UpstreamTitle}}</h1>
 </div>
 <p class="meta">{{.L.T "client.name"}} <b>{{if .ClientName}}{{.ClientName}}{{else}}{{.L.T "client.unnamed"}}{{end}}</b> <span class="tag">{{.L.T "client.unverified"}}</span></p>
-{{if .Error.ID}}<div class="err" role="alert"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg><p>{{.L.Msg .Error}}</p></div>
+{{if .Error.ID}}<div class="err" role="alert" id="err"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg><p>{{.L.Msg .Error}}</p></div>
 {{end}}<form method="post" action="{{.Action}}" autocomplete="off">
 <input type="hidden" name="request" value="{{.Request}}">
-{{range .Fields}}<label for="{{.ID}}">{{.Label}}{{if .Optional}} <span class="opt">{{$.L.T "field.optional"}}</span>{{end}}</label>
+<input type="hidden" name="lang" value="{{.L.Lang}}">
+{{range .Fields}}<label for="{{.ID}}"{{if .Lang}} lang="{{.Lang}}"{{end}}>{{.Label}}{{if .Optional}} <span class="opt">{{$.L.T "field.optional"}}</span>{{end}}</label>
 <input id="{{.ID}}" name="{{.ID}}" type="{{if .Secret}}password{{else}}text{{end}}" autocomplete="off" autocapitalize="off" spellcheck="false"{{if not .Optional}} required{{end}}{{if .Value}} value="{{.Value}}"{{end}}>
 {{end}}{{with .Audit}}<section class="panel" aria-labelledby="audit-h">
 <div class="hd"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><h2 id="audit-h">{{$.L.T "audit.heading"}}</h2></div>
 <ul>
 <li>{{$.L.T "audit.time"}}</li>
 <li>{{$.L.T "audit.ip"}}</li>
-{{range .Logged}}<li>{{$.L.T "audit.your" .}}</li>
+{{range .Logged}}<li>{{template "slot" .}}</li>
 {{end}}<li>{{$.L.T "audit.tools"}}</li>
 </ul>
-<p>{{$.L.T "audit.retention" .Retention}}</p>
-{{if .NeverLogged}}<p>{{$.L.T "audit.never"}} {{range .NeverLogged}}<span class="chip">{{.}}</span>{{end}}</p>
+<p>{{template "slot" .Retention}}</p>
+{{if .NeverLogged}}<p>{{$.L.T "audit.never"}} {{range .NeverLogged}}<span class="chip"{{if .Lang}} lang="{{.Lang}}"{{end}}>{{.Text}}</span>{{end}}</p>
 {{end}}</section>
 {{end}}{{if or .Notice .ContactHref}}<section class="notice" aria-labelledby="notice-h">
 <h2 id="notice-h">{{.L.T "notice.heading"}}</h2>
-{{range .Notice}}<p>{{.}}</p>
+{{range .Notice}}<p{{if $.NoticeLang}} lang="{{$.NoticeLang}}"{{end}}>{{.}}</p>
 {{end}}{{if .ContactHref}}<p>{{.L.T "notice.contact"}} <a href="{{.ContactHref}}">{{.Contact}}</a></p>
 {{end}}</section>
+{{end}}{{with .Terms}}<details class="terms">
+<summary>{{$.L.T "terms.summary" .Version}}</summary>
+<div class="terms-body" tabindex="0" role="region" aria-label="{{$.L.T "terms.region_label"}}"{{if .TextLang}} lang="{{.TextLang}}"{{end}}>
+{{range .Paragraphs}}<p>{{.}}</p>
+{{end}}</div>
+{{if .URL}}<p class="full"><a href="{{.URL}}" rel="noopener"{{if .URLLang}} lang="{{.URLLang}}" hreflang="{{.URLLang}}"{{end}}>{{$.L.T "terms.full_text"}}</a></p>
+{{end}}</details>
 {{end}}<p class="hint">{{if .Audit}}{{.L.T "hint.audit"}}{{else}}{{.L.T "hint.plain"}}{{end}} {{.L.T "hint.continue"}}</p>
-<button type="submit">{{.L.T "button.authorize"}}</button>
+{{if .Terms}}<label class="check{{if .TermsInvalid}} bad{{end}}"><input type="checkbox" name="accept_terms" value="on" required{{if .TermsInvalid}} aria-invalid="true" aria-describedby="err"{{end}}><span>{{.L.T "terms.accept"}}</span></label>
+{{end}}<button type="submit">{{.L.T "button.authorize"}}</button>
 </form>
 </main>
 </body>
 </html>
+{{define "slot"}}{{if .Lang}}{{.Before}}<span lang="{{.Lang}}">{{.Arg}}</span>{{.After}}{{else}}{{.Text}}{{end}}{{end}}

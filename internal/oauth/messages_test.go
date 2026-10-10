@@ -26,9 +26,35 @@ func TestCatalogCoversTemplates(t *testing.T) {
 			}
 		}
 	}
-	for id, text := range catalog[defaultLang] {
-		if strings.ContainsAny(text, "<>") {
-			t.Errorf("message %q contains markup characters: %q", id, text)
+	for lang, msgs := range catalog {
+		for id, text := range msgs {
+			if strings.ContainsAny(text, "<>") {
+				t.Errorf("%s/%s contains markup characters: %q", lang, id, text)
+			}
+		}
+	}
+}
+
+// The built-in languages translate every message of the default language, and
+// every language in the switcher has a catalog.
+func TestBuiltInLanguagesCoverEveryID(t *testing.T) {
+	for _, l := range pageLangs {
+		msgs, ok := catalog[l.Code]
+		if !ok {
+			t.Fatalf("language %s has no catalog", l.Code)
+		}
+		for id := range catalog[defaultLang] {
+			if text, ok := msgs[id]; !ok || strings.TrimSpace(text) == "" {
+				t.Errorf("%s misses message %q", l.Code, id)
+			}
+		}
+	}
+	if pageLangs[0].Code != defaultLang {
+		t.Errorf("the first language is %q, want the default %q", pageLangs[0].Code, defaultLang)
+	}
+	for code := range catalog {
+		if !supportedLang(code) {
+			t.Errorf("catalog %q is not in pageLangs", code)
 		}
 	}
 }

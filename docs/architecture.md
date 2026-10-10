@@ -105,8 +105,13 @@ families (see Token endpoint).
 unverified, one input per credential, then the "What this server logs" panel
 when `audit.enabled`, the operator's `oauth.page` notice and contact, and a hint
 that matches the audit mode). Page text comes from a small message catalog
-keyed by id (`internal/oauth/messages.go`), formatted in Go and HTML-escaped by
-`html/template`; the page is one inline stylesheet allowed by a CSP hash;
+keyed by language and id (`internal/oauth/messages.go`, `messages_ru.go`,
+`messages_kk.go`), formatted in Go and HTML-escaped by `html/template`. The
+language is negotiated per request (`internal/oauth/lang.go`: a valid `lang`
+parameter, then `Accept-Language` with q-values, then `en`), shown with a
+switcher whose links are rebuilt from the validated, sealed request, and used
+for display only. When `oauth.page.terms` is set the page also shows the terms
+and a required checkbox; the page is one inline stylesheet allowed by a CSP hash;
 `POST /oauth/authorize` turns the submitted form into an authorization code.
 Other methods get `405`. No CORS headers are set (the endpoint is only
 navigated to). Both methods are rate limited per client IP, each with its own
@@ -183,7 +188,8 @@ that follows the POST, so the client's origin must be listed).
 
 **Submission.** The POST body is capped at 32 KiB (`413` page beyond), and a
 declared cross-site POST gets a `403` page. Only the sealed `request` and the
-`cred_N` fields are read; the client, redirect and upstream are re-validated
+`cred_N` fields, plus `accept_terms` and `lang`, are read (the last only to pick
+the display language); the client, redirect and upstream are re-validated
 against the current config, so a revoked redirect or removed upstream fails
 even for an already rendered form, and an invalid or expired sealed request is
 a `400` page. Values are trimmed; a required value that is empty, and any value
@@ -191,6 +197,16 @@ a `400` page. Values are trimmed; a required value that is empty, and any value
 characters, re-renders the form (`400`) with a message and without echoing secrets. The remaining steps run in
 this order, cheapest refusal first:
 
+0. when `oauth.page.terms` is set, the acceptance: anything but `accept_terms=on`
+   re-renders the form (`400`, localized banner, checkbox marked invalid, the
+   non-secret values kept). It is checked before every step below, even before
+   the per-field value checks, so a missing checkbox costs no sizing, no
+   allow-list lookup, no upstream call and no spend of the global ceiling (the
+   per-IP limit has already been charged by its middleware). The terms version
+   is sealed into the form at render time; a form shown under another version
+   is refused the same way and re-rendered with the current terms. The audit
+   `authorize` record then carries `terms_version`, `terms_lang` (the language
+   the terms were shown in) and `lang`;
 1. the token size budget: the credentials must fit the worst-case code, access
    and refresh token (`seal.MaxTokenSize`, 16 KiB encoded), else the form is
    re-rendered (`400`, "The credentials together are too long.");

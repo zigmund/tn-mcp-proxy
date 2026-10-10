@@ -1,0 +1,13 @@
+This service connects your AI assistant to your Tradernet account. By continuing you agree to these terms.
+
+1. The service is free and provided "as is", without any warranty. It can be slow, wrong or unavailable, and can stop working at any time.
+
+2. You use it at your own risk. The operator is not liable for any loss, including trading losses, caused by orders or other actions made through the service, by errors or outages, or by the AI assistant you connect.
+
+3. The operator is not affiliated with, endorsed by or acting for the broker or Tradernet.
+
+4. The server logs the time and your IP address for each request, the tools called, and the values listed under "What this server logs" on this page. Apart from that, it does not log or store any credential values. Logs are kept for [RETENTION, for example 12 months].
+
+5. To stop, revoke or rotate your API key and, if you entered a SID, end that session in Tradernet: this cuts off any access made with them. You can also ask the operator: [CONTACT, for example ops@example.org].
+
+6. The operator may refuse or revoke access at any time, without notice.

@@ -29,8 +29,10 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on the `POST /oauth/authorize` submissions that are about to get a code. `burst` defaults to `per_minute`; setting `burst` needs `per_minute` too. See [Rate limiting](#rate-limiting) |
 | `oauth.page.contact` | | Optional operator contact on the authorize page: `mailto:` address or `https://` URL, at most 256 bytes, no whitespace, control or Unicode format characters. Shown as a link (the text drops `mailto:`) under "Notice from the operator" |
 | `oauth.page.notice` | | Optional notice on the authorize page: a map of lowercase language code (2 or 3 letters) to plain text, each at most 4 KiB of UTF-8 without control characters other than newline and tab, at most 32 languages. Paragraphs are separated by blank lines. Text is HTML-escaped, never interpreted. When `notice` is set it must contain an `en` entry (config error otherwise); the page shows the entry for its language, else `en`. Unicode format characters (bidi controls, zero-width) are rejected |
+| `oauth.page.terms` | | Optional terms of use the user must accept on the authorize page. Keys `version`, `text`, `url`; see [Languages and terms of use](#languages-and-terms-of-use) |
 | `audit.enabled` | `false` | Opt-in audit log tying client IPs to audited credential values. Needs `log.level` `debug` or `info`. See [Audit log](#audit-log) |
 | `audit.retention` | | Required when `audit.enabled`. Short free text, at most 64 characters, printable, no control characters (for example `12 months`). It states your retention of the audit records. The proxy does not enforce it: your log rotation does |
+| `audit.retention_i18n` | | Optional map of language code to the retention text for that language (same rules as `retention`, per entry). Needs an `en` entry that equals `retention`; `retention` may then be omitted and is taken from it. See [Languages and terms of use](#languages-and-terms-of-use) |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
@@ -84,7 +86,7 @@ Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
 input), `optional`, `allowed_values` (optional list of accepted values, see
 [Restricting access](#restricting-access)), `audit` (write the value to the
-audit log, see [Audit log](#audit-log); an error together with `secret: true`). Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
+audit log, see [Audit log](#audit-log); an error together with `secret: true`), `labels` (optional map of language code to the label for that language, at most 128 characters, printable; needs an `en` entry that equals `label`, and `label` may then be omitted; see [Languages and terms of use](#languages-and-terms-of-use)). Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
 
 `validate` fields: `tool` (required, MCP tool called with the entered
 credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
@@ -424,6 +426,101 @@ the start of the record's `msg`; fields in parentheses):
 | `warn` | `credential check failed` (`upstream`) | Authorize-time check failed with an unclassified error |
 | `info`/`warn` | `tls certificate loaded`, `tls certificate expires soon`, `tls certificate reload failed, ...`, `reloaded`, `reload requested, nothing to reload` | Built-in TLS and SIGHUP |
 
+## Languages and terms of use
+
+The authorize and error pages are built in English (`en`, the default and the
+fallback), Russian (`ru`) and Kazakh (`kk`). The switcher at the top of the
+authorize page lists them in that order. The language of a request is, in this
+order:
+
+1. a valid `lang` parameter (`en`, `ru` or `kk`; the POST form carries it as a
+   hidden field, so a re-rendered form keeps its language);
+2. the best match of `Accept-Language`: q-values are honoured, a region is
+   ignored (`ru-RU` is `ru`, `kk-KZ` is `kk`), `q=0` excludes a language;
+3. `en`.
+
+Unknown values are ignored. The language only changes what is displayed; it
+never takes part in an authorization decision. Error pages are localized the
+same way (a POST that fails before its body is read, such as a rate-limited
+one, uses the query and `Accept-Language` only). The switcher links are built on
+the server from the validated authorize request (`/oauth/authorize?...&lang=xx`,
+never from the raw query), so they also work after a failed submit. The error
+page has no switcher, because its link could not be rebuilt without echoing the
+raw query.
+
+> [!NOTE]
+> The Kazakh texts (the page and the sample agreement) are machine-written and
+> need review by a native speaker before you rely on them. The sample
+> agreements are samples, not legal advice.
+
+**Operator text per language.** Wherever you set a map of language code to
+text, `en` is required, and the page uses the entry for its language, else
+`en`. A text shown in another language than the page is wrapped in a `lang`
+attribute.
+
+- `oauth.page.notice`: map of language to text (see the fields table).
+- `upstreams[].credentials[].labels`: map of language to label, next to `label`
+  (the English and default label). `en` must equal `label`, or `label` is
+  omitted and taken from `labels.en`.
+- `audit.retention_i18n`: map of language to retention text, next to the plain
+  string `audit.retention`, which stays valid on its own. `en` must equal
+  `retention`, or `retention` is omitted and taken from it.
+
+```yaml
+audit:
+  enabled: true
+  retention: "12 months"
+  retention_i18n: { en: "12 months", ru: "12 месяцев", kk: "12 ай" }
+upstreams:
+  - credentials:
+      - { header: X-TN-API-Key, label: API key, labels: { en: API key, ru: Ключ API }, audit: true }
+```
+
+**Terms of use.** Optional. When `oauth.page.terms` is set, the form shows a
+collapsible "Terms of use (version X)" block (the text, and a "Full text" link
+when `url` is set) and a required checkbox before the Authorize button:
+
+```yaml
+oauth:
+  page:
+    terms:
+      version: "2026-10-10"            # required, at most 32 printable characters
+      text:                            # language -> file; en required
+        en: /etc/tn-mcp-proxy/terms.en.txt
+        ru: /etc/tn-mcp-proxy/terms.ru.txt
+        kk: /etc/tn-mcp-proxy/terms.kk.txt
+      url:                             # optional; language -> https URL of the full text; en required if set
+        en: https://example.org/terms
+```
+
+The files are read when the config is loaded (a relative path is resolved
+against the config file's directory), so a change needs a restart. Each is plain text of at most 32 KiB: valid UTF-8 without
+control or format characters other than newline and tab; CRLF is normalized;
+paragraphs are separated by blank lines. The text is HTML-escaped, never
+interpreted. Errors name the field and never echo the content. When the
+language has no text or URL, the `en` one is shown.
+
+A submit without `accept_terms=on` is refused: the form is re-rendered
+(`400`) with a localized error banner and the checkbox marked invalid, keeping
+the non-secret values. The check runs before anything else costs resources (see
+[Authorization](architecture.md#authorization)), so a missing checkbox causes no
+upstream call and does not spend the global authorize ceiling. The terms
+version is sealed into the rendered form: a form shown under a different
+version (or before terms were configured) is refused the same way even with
+the box ticked, and re-rendered with the current terms. The audit `authorize`
+record carries `terms_version`, `terms_lang` and `lang`. Raising the `version`
+does not invalidate existing tokens: it applies to the next authorization.
+
+Sample agreements are in `deploy/terms.example.en.txt`, `.ru.txt` and `.kk.txt`
+and ship in the release archive. They say the service is free and provided "as
+is", that use is at the user's risk including trading losses, that the operator
+is not affiliated with the broker, what is logged and for how long (fill the
+`[RETENTION]` and `[CONTACT]` placeholders; they assume the audit log is on, so
+edit item 4 otherwise), how to stop (revoke or rotate the API key, or ask the
+operator), and that the operator may refuse or revoke access. They are
+**samples, not legal advice**: have them reviewed for your jurisdiction. The
+Kazakh sample is machine-written and needs native review.
+
 ## Audit log
 
 When a server is open to anyone's Tradernet keys, a broker or the police may ask
@@ -458,7 +555,7 @@ as `X-Tn-Api-Key`).
 
 | `event` | Written when | Other fields |
 |---|---|---|
-| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host` |
+| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host`, `lang` (the page language), `terms_version` and `terms_lang` (when `oauth.page.terms` is set: the version the user accepted and the language its text was shown in, which can be the `en` fallback) |
 | `token` | a token pair is issued | `grant_type` (`authorization_code` or `refresh_token`), `client_id`, `family` |
 | `request` | a proxied MCP request ends | `method` (HTTP), `status`, `rpc_method`, `tool`; for a batch `rpc_batch` and `rpc` (`0`, `1`, ... each with `method` and `tool`) |
 

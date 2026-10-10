@@ -38,7 +38,55 @@ must own the root `/.well-known/*` and `/oauth/*` paths of its host.
 
 The flow is stateless: client ids, authorization codes and tokens are sealed
 blobs (see Token sealing), so no server-side session or storage exists.
-Details of register, authorize and token are documented as those endpoints land.
+Details of authorize and token are documented as those endpoints land.
+
+### Client registration
+
+`POST /oauth/register` (RFC 7591) takes a JSON body (`Content-Type:
+application/json`, at most 64 KiB, unknown fields ignored) and stores nothing.
+The `client_id` is a sealed `client` record, `{redirect_uris, client_name,
+token_endpoint_auth_method, issued_at}`, with no expiry. Opening it
+(`openClient`) both authenticates it as ours and yields the registered
+metadata, so authorize and token never need a lookup. The response is `201`
+with `Cache-Control: no-store`; errors are `400` JSON `{error,
+error_description}` (`invalid_redirect_uri`, `invalid_client_metadata`), `415`
+for a wrong content type. CORS is open (`Access-Control-Allow-Origin: *`,
+preflight answered) for browser-based MCP inspectors; no cookies or
+credentials are involved.
+
+- **Redirect allowlist.** `redirect_uris` is required (1 to 10 entries); each
+  must exactly equal an entry of `oauth.allowed_redirect_uris` (default: the
+  claude.ai and claude.com callbacks). No patterns, no normalization. The
+  authorize endpoint checks the redirect URI against both the client's
+  registered list and the current config, so removing a URI from the config
+  revokes it for clients that registered earlier.
+- **Auth methods.** `token_endpoint_auth_method` is `none`,
+  `client_secret_post` or `client_secret_basic` (the RFC 7591 default when
+  omitted). Anything else is rejected. At the token endpoint a `none` client
+  must authenticate with `client_id` only. A secret client must present its
+  secret but may send it via Basic or the form body, whichever it uses (some
+  clients ignore the registered method); sending it both ways is refused, and
+  an empty `client_secret` field counts as absent.
+- **Client secret.** For the two secret-based methods the response includes
+  `client_secret` = `base64url(MAC("client_secret", client_id))` under the
+  seal MAC key, with `client_secret_expires_at: 0`. It is derived, not stored,
+  and verified in constant time (`VerifyMAC`, so any still-configured key
+  works). Basic credentials are form-urlencoded before base64 (RFC 6749
+  section 2.3.1). A `none` client has no secret and relies on PKCE.
+- **Grants.** `grant_types` must be a subset of `authorization_code`,
+  `refresh_token` and `response_types` a subset of `code` (which requires `authorization_code`
+  among the grants); when omitted the
+  response reports both grants (we support refresh, unlike the RFC default).
+  `scope` is ignored. `client_name` is trimmed, stripped of control and
+  invisible format characters, capped at 100 runes and shown (HTML-escaped) on
+  the authorize page.
+- **Key rotation.** The secret and the client id are bound to the token keys.
+  While the old key stays configured, registered clients keep working. Once it
+  is dropped, their ids stop opening. The first place this surfaces is
+  `/oauth/authorize`: with an unverifiable `client_id` it cannot redirect
+  (the redirect URI is untrusted), so it renders an error page. The token
+  endpoint answers `invalid_client` for such ids; claude.ai handles that by
+  registering again.
 
 ## Proxying
 

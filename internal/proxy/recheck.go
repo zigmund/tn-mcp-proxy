@@ -63,6 +63,7 @@ type flight struct {
 // logged), one in-flight check per key, and a global cap on concurrent checks.
 type Rechecker struct {
 	checker *credcheck.Checker
+	version string // reported to upstreams by the checker
 	log     *slog.Logger
 	now     func() time.Time
 	macKey  [32]byte
@@ -74,14 +75,22 @@ type Rechecker struct {
 	flights map[[sha256.Size]byte]*flight
 }
 
+// RecheckerOption configures a Rechecker.
+type RecheckerOption func(*Rechecker)
+
+// WithRecheckerVersion sets the binary version the re-check requests report
+// to the upstream (User-Agent and MCP clientInfo). An empty version means "dev".
+func WithRecheckerVersion(v string) RecheckerOption {
+	return func(r *Rechecker) { r.version = v }
+}
+
 // NewRechecker returns a Rechecker with its own credential checker. A nil log
 // means slog.Default().
-func NewRechecker(log *slog.Logger) *Rechecker {
+func NewRechecker(log *slog.Logger, opts ...RecheckerOption) *Rechecker {
 	if log == nil {
 		log = slog.Default()
 	}
 	r := &Rechecker{
-		checker: credcheck.New(),
 		log:     log,
 		now:     time.Now,
 		sem:     make(chan struct{}, maxConcurrentRechecks),
@@ -89,6 +98,10 @@ func NewRechecker(log *slog.Logger) *Rechecker {
 		order:   list.New(),
 		flights: map[[sha256.Size]byte]*flight{},
 	}
+	for _, o := range opts {
+		o(r)
+	}
+	r.checker = credcheck.New(r.version)
 	_, _ = rand.Read(r.macKey[:]) // never fails since Go 1.24 (it aborts the program instead)
 	return r
 }

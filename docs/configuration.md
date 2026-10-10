@@ -214,8 +214,8 @@ upstreams:
 
 The check sends these requests to the upstream `url` exactly as configured
 (path and query intact), each carrying the entered credential headers and a
-`User-Agent: tn-mcp-proxy/<version>` (the module version from the Go build
-info, or `dev`; it can differ from the output of `-version`); the POSTs also carry
+`User-Agent: tn-mcp-proxy/<version>` (the binary's version, the same
+one `-version` prints; `dev` for an unversioned build); the POSTs also carry
 `Content-Type: application/json` and
 `Accept: application/json, text/event-stream`:
 

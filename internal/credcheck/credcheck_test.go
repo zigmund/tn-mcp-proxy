@@ -143,7 +143,7 @@ func (f *mcpFake) upstream(v config.Validate) config.Upstream {
 }
 
 func (f *mcpFake) Check(v config.Validate) error {
-	return New().Check(context.Background(), f.upstream(v), testCreds)
+	return New("").Check(context.Background(), f.upstream(v), testCreds)
 }
 
 // wantCheck asserts the outcome kind and that the reason contains reason.
@@ -219,7 +219,7 @@ func TestCheckNoValidateIsNoop(t *testing.T) {
 	f := newMCPFake(t)
 	up := f.upstream(config.Validate{})
 	up.Validate = nil
-	if err := New().Check(context.Background(), up, testCreds); err != nil {
+	if err := New("").Check(context.Background(), up, testCreds); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(f.requests()); n != 0 {
@@ -378,7 +378,7 @@ func TestCheckParentContextCanceled(t *testing.T) {
 	f := newMCPFake(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := New().Check(ctx, f.upstream(config.Validate{}), testCreds)
+	err := New("").Check(ctx, f.upstream(config.Validate{}), testCreds)
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("check = %v, want unavailable", err)
 	}
@@ -388,7 +388,7 @@ func TestCheckUnreachableUpstream(t *testing.T) {
 	f := newMCPFake(t)
 	up := f.upstream(config.Validate{})
 	f.srv.Close()
-	err := New().Check(context.Background(), up, testCreds)
+	err := New("").Check(context.Background(), up, testCreds)
 	wantCheck(t, err, ErrUnavailable, "transport error")
 	if strings.Contains(err.Error(), f.srv.URL) {
 		t.Errorf("error contains the upstream URL: %v", err)
@@ -463,7 +463,7 @@ func TestCheckUpstreamURLUsedAsConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 	up := config.Upstream{Name: "tn", URL: srv.URL + "/mcp/tn?k=v", Validate: &config.Validate{Tool: "t"}}
-	_ = New().Check(context.Background(), up, testCreds)
+	_ = New("").Check(context.Background(), up, testCreds)
 	if gotURI != "/mcp/tn?k=v" {
 		t.Errorf("request URI = %q", gotURI)
 	}
@@ -480,7 +480,7 @@ func TestCheckConcurrencyCap(t *testing.T) {
 		}
 		mcpJSON(w, 200, rpcResult(id, `{}`))
 	})
-	c := New()
+	c := New("")
 	c.sem = make(chan struct{}, 1)
 
 	first := make(chan error, 1)
@@ -521,7 +521,7 @@ func TestCheckConcurrentChecksNeverExceedCap(t *testing.T) {
 		mu.Unlock()
 		mcpJSON(w, 200, rpcResult(id, `{}`))
 	})
-	c := New()
+	c := New("")
 	c.sem = make(chan struct{}, cap)
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
@@ -584,6 +584,32 @@ func TestParseRPC(t *testing.T) {
 			}
 			if err == nil && string(m.Result) != tt.want {
 				t.Errorf("result = %s, want %s", m.Result, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckReportsGivenVersion(t *testing.T) {
+	for _, tt := range []struct{ name, version, want string }{
+		{"given", "v1.2.3", "v1.2.3"},
+		{"empty falls back to dev", "", "dev"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newMCPFake(t)
+			err := New(tt.version).Check(context.Background(), f.upstream(config.Validate{}), testCreds)
+			wantCheck(t, err, nil, "")
+			reqs := f.requests()
+			if len(reqs) == 0 {
+				t.Fatal("no requests")
+			}
+			for _, r := range reqs {
+				if got := r.Header.Get("User-Agent"); got != "tn-mcp-proxy/"+tt.want {
+					t.Errorf("%s: User-Agent = %q", r.RPC, got)
+				}
+			}
+			init := reqs[0].Msg["params"].(map[string]any)["clientInfo"].(map[string]any)
+			if init["name"] != "tn-mcp-proxy" || init["version"] != tt.want {
+				t.Errorf("clientInfo = %v, want version %q", init, tt.want)
 			}
 		})
 	}

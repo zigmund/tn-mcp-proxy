@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -68,11 +67,20 @@ func unavailable(step, reason string, cause error) *CheckError {
 // owns its HTTP client: redirects are never followed, because the credential
 // headers would be forwarded to whatever host the upstream names.
 type Checker struct {
-	client *http.Client
-	sem    chan struct{} // bounds concurrent checks
+	client  *http.Client
+	sem     chan struct{} // bounds concurrent checks
+	version string        // the binary's version, sent in User-Agent and clientInfo
 }
 
-func New() *Checker {
+// DefaultVersion is used when New is given an empty version.
+const DefaultVersion = "dev"
+
+// New returns a Checker that identifies itself as tn-mcp-proxy/version, in
+// the User-Agent header and the MCP clientInfo. An empty version means "dev".
+func New(version string) *Checker {
+	if version == "" {
+		version = DefaultVersion
+	}
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	// Credentials travel in request headers: never route the check through an
 	// HTTP(S)_PROXY from the environment, which would see them.
@@ -85,7 +93,8 @@ func New() *Checker {
 			Transport:     t,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		sem: make(chan struct{}, maxChecks),
+		sem:     make(chan struct{}, maxChecks),
+		version: version,
 	}
 }
 
@@ -140,7 +149,7 @@ func (s *mcpSession) run(ctx context.Context, v *config.Validate) *CheckError {
 	initReq, err := marshalRPC(idInitialize, "initialize", map[string]any{
 		"protocolVersion": mcpProtocolVersion,
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "tn-mcp-proxy", "version": buildVersion()},
+		"clientInfo":      map[string]any{"name": "tn-mcp-proxy", "version": s.c.version},
 	})
 	if err != nil {
 		return unavailable("initialize", "encoding request", nil)
@@ -253,7 +262,7 @@ func (s *mcpSession) do(ctx context.Context, method string, payload []byte) (*ht
 	for k, v := range s.creds {
 		req.Header.Set(k, v)
 	}
-	req.Header.Set("User-Agent", "tn-mcp-proxy/"+buildVersion())
+	req.Header.Set("User-Agent", "tn-mcp-proxy/"+s.c.version)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
@@ -487,12 +496,4 @@ func splitSSELines(data []byte, atEOF bool) (int, []byte, error) {
 		return i + 2, data[:i], nil
 	}
 	return i + 1, data[:i], nil
-}
-
-// buildVersion is the module version of the binary, or "dev".
-func buildVersion() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		return bi.Main.Version
-	}
-	return "dev"
 }

@@ -221,6 +221,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Held until the response, a long-lived SSE stream included, has ended or
 	// the client has gone: ReverseProxy.ServeHTTP returns then.
 	defer release()
+	if !h.inspectToolArguments(w, r, maxBody) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	h.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), credsKey{}, creds)))
 }

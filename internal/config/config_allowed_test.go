@@ -7,7 +7,7 @@ import (
 
 func allowedYAML(cred string) string {
 	return "public_url: https://mcp.example.com/\nsecrets:\n  token_keys: [\"" + key1 + "\"]\n" +
-		"upstreams:\n  - name: tn\n    path: /tn/mcp\n    url: https://tradernet.com/mcp/tn\n    credentials:\n      - " + cred + "\n"
+		"upstreams:\n  - name: tn\n    path: /tn/mcp\n    url: https://tradernet.com/mcp/tn\n    credentials:\n      - " + cred + "\n    validate: { tool: get_auth_info }\n"
 }
 
 func TestAllowedValuesValidation(t *testing.T) {

@@ -38,6 +38,8 @@ upstreams:
     url: %s/mcp
     credentials:
       - { header: X-Api-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
+    validate:
+      tool: get_auth_info
 `, e2ePublicURL, e2eRedirectURI, up.srv.URL)), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -106,9 +108,10 @@ upstreams:
 	})
 	tp := decodeTokens(t, rec)
 
+	before, _, _ := up.snapshot() // the credential check already contacted the upstream
 	rec = callUpstream(t, h, "/fake/mcp", tp.AccessToken)
 	mustStatus(t, rec, http.StatusOK, "proxied call")
-	if n, hdr, _ := up.snapshot(); n != 1 || hdr.Get("X-Api-Key") != "REPLACE_WITH_YOUR_API_KEY" {
-		t.Fatalf("upstream calls = %d, key = %q", n, hdr.Get("X-Api-Key"))
+	if n, hdr, _ := up.snapshot(); n != before+1 || hdr.Get("X-Api-Key") != "REPLACE_WITH_YOUR_API_KEY" {
+		t.Fatalf("upstream calls = %d (before %d), key = %q", n, before, hdr.Get("X-Api-Key"))
 	}
 }

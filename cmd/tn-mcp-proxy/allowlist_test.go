@@ -12,7 +12,7 @@ import (
 func TestWarnNoAllowList(t *testing.T) {
 	cfg := &config.Config{Upstreams: []config.Upstream{
 		{Name: "open1", Credentials: []config.Credential{{Header: "X-A"}}},
-		{Name: "closed", Credentials: []config.Credential{{Header: "X-A", AllowedValues: []string{"SECRET-VALUE"}}}},
+		{Name: "closed", ForbiddenArguments: []string{"api_key"}, Credentials: []config.Credential{{Header: "X-A", AllowedValues: []string{"SECRET-VALUE"}}}},
 		{Name: "open2", Credentials: []config.Credential{{Header: "X-A"}, {Header: "X-B"}}},
 	}}
 	var buf bytes.Buffer

@@ -85,7 +85,9 @@ upstreams:
       # See docs/configuration.md#restricting-access
       # Optional allow-list (non-secret credentials only): only these values get
       # a token, existing tokens with other values stop working, and the upstream
-      # is not contacted for anything else.
+      # is not contacted for anything else. Requires the validate block below
+      # (startup fails without it). The allow-list gates token issuance only;
+      # forbidden_arguments below covers request content.
       # (this line replaces the X-TN-API-Key entry above; do not enable both,
       # a duplicate header is a config error)
       # - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
@@ -106,6 +108,11 @@ upstreams:
       # says the credentials are rejected the client gets 401 invalid_token and
       # re-authorizes, otherwise the original response is forwarded unchanged.
       recheck_on_tool_error: true
+    # Tool arguments that tools/call requests must not carry (case-insensitive;
+    # presence is enough). Tradernet tools accept api_key / api_secret as
+    # arguments, which would bypass the credentials injected as headers.
+    # Legitimate clients that authenticate with headers are unaffected.
+    forbidden_arguments: [api_key, api_secret]
 
 # Optional built-in TLS (both files or neither); leave commented out when a
 # reverse proxy terminates TLS. Relative paths are resolved against this file's

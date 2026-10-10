@@ -59,7 +59,8 @@ in logs, `fmt`, JSON and YAML output.
 > server's IP and the upstream tools can trade on the account (place and cancel
 > orders) and read the portfolio and balances, so in a broker, exchange or police
 > inquiry the activity points to you, the operator. Set `allowed_values` on the non-secret credential
-> (for example `X-TN-API-Key`) or keep the server private. Startup logs a
+> (for example `X-TN-API-Key`) together with `validate` and `forbidden_arguments`,
+> or keep the server private. Startup logs a
 > warning for each upstream without an allow-list. See
 > [Restricting access](#restricting-access).
 
@@ -70,7 +71,8 @@ in logs, `fmt`, JSON and YAML output.
 | `path` | required | Matches `^(/[A-Za-z0-9._~-]+)+$`, no `.`/`..` segments, no trailing slash. Must not equal or overlap `/oauth`, `/.well-known`, `/healthz`; no upstream path may be a segment-wise prefix of another |
 | `url` | required | Absolute http(s) URL, no userinfo/fragment |
 | `credentials[]` | at least one non-optional | Headers the user supplies |
-| `validate` | absent (no validation) | Optional. Verify the entered credentials against the upstream before a code is issued. See [Credential validation](#credential-validation) |
+| `validate` | absent (no validation) | Optional. Verify the entered credentials against the upstream before a code is issued. Required when any credential has `allowed_values`. See [Credential validation](#credential-validation) |
+| `forbidden_arguments` | absent | Optional list of tool argument names (case-insensitive) rejected in `tools/call` requests, for example `[api_key, api_secret]`. See [Forbidden tool arguments](#forbidden-tool-arguments) |
 
 Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
@@ -96,12 +98,16 @@ By default anyone whose credentials work upstream can obtain a token. The form
 checks the credentials against the upstream (see below) but not whose they are,
 and the upstream then sees requests coming from this server's IP. To restrict
 who can use the server, for example when it is public but only meant for you,
-list the accepted values on a non-secret credential:
+list the accepted values on a non-secret credential, with `validate` and
+`forbidden_arguments`:
 
 ```yaml
 credentials:
   - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
   - { header: X-TN-API-Secret, label: API secret, secret: true }
+  - { header: X-TN-SID, label: SID, optional: true }
+validate: { tool: get_auth_info }
+forbidden_arguments: [api_key, api_secret]
 ```
 
 Rules:
@@ -117,13 +123,62 @@ Rules:
 - Matching is exact (case-sensitive) after trimming surrounding whitespace, the
   same normalization the authorize form applies, and constant-time.
 
-Enforcement: `POST /oauth/authorize` refuses a value outside the list with the
-same message as a rejected credential (the form does not reveal that a list
-exists), before any upstream call and before anything is sealed; the
-`refresh_token` grant answers `invalid_grant`; every proxied request answers
-`401 invalid_token`. So removing a value from the list and restarting cuts off tokens already issued for it.
+- An upstream with `allowed_values` must also set `validate`; otherwise
+  startup fails with `allowed_values requires validate`.
 
-Without any list on an upstream, startup logs one warning for that upstream.
+The allow-list gates token issuance. It is effective only together with
+`validate`: without it, the API key alone (which is not secret) would yield a
+token paired with any secret. It does not control request content. A token
+holder can still put anything into a tool call, including credentials as tool
+arguments, which some upstreams accept as a documented fallback. That is what
+`forbidden_arguments` is for (below).
+
+Enforcement: `POST /oauth/authorize` refuses a value outside the list with the
+same message as a rejected credential, before any upstream call and before
+anything is sealed; the `refresh_token` grant answers `invalid_grant`; every
+proxied request answers `401 invalid_token`. So removing a value from the list
+and restarting cuts off tokens already issued for it. The message is identical,
+but the timing is not: a refusal by the list returns without an upstream round
+trip, while a listed key with a wrong secret waits for the credential check. An
+observer can therefore infer by timing that a list exists and whether a
+candidate API key is on it. The comparison itself is constant-time and the
+secret is still required.
+
+Without any list on an upstream, startup logs one warning for that upstream. A
+list without `forbidden_arguments` also logs a warning.
+
+### Forbidden tool arguments
+
+```yaml
+forbidden_arguments: [api_key, api_secret]   # upstream-level, next to credentials
+```
+
+When set, POST bodies on the MCP path are inspected: a JSON-RPC `tools/call`
+whose `params.arguments` object contains any listed name (case-insensitive;
+presence counts even if the value is null or empty) is answered with HTTP 400
+and a JSON-RPC error (`code` -32602, `argument not allowed: <name>`; `id` is
+the request id when it is a string, number or null, else null) and never reaches
+the upstream. A batch is rejected as a whole if any element offends (`id` null).
+Only the top level of `arguments` is checked.
+
+The inspection fails closed, because the upstream's JSON parser may differ from
+the proxy's. The body must be valid UTF-8 JSON (only space, tab, CR and LF may
+surround it; a byte order mark or UTF-16 is refused) and a single object or a
+non-empty array of objects; otherwise the answer is 400 with `-32700 Parse
+error`. The structural keys `method`, `params` and `arguments` are matched
+exactly (case-sensitively); a duplicate `method` or `params` in any message, a
+duplicate `arguments` in a `tools/call`, or a `method` that is not a string,
+gets 400 with `-32600 Invalid Request`. Argument names are
+matched case-insensitively. Methods other than `tools/call` pass once the body
+is well-formed. A request with a `Content-Encoding` other than `identity`
+cannot be inspected and gets 415. The body is read once into memory, within
+`limits.max_request_body`, and forwarded byte for byte; every in-flight POST
+holds its body in memory meanwhile (see the sizing note under
+[Proxy limits](#proxy-limits)). Logs carry the
+upstream and argument name, never values. Legitimate clients that authenticate
+with headers are unaffected. Names: at most 32, each non-empty, at most 128
+bytes, valid UTF-8, no leading or trailing whitespace, no control characters,
+unique case-insensitively.
 
 [Proxy limits](#proxy-limits) bound the volume of abuse but do not replace an
 allow-list.
@@ -460,7 +515,7 @@ the per-IP budget and the in-flight cap are global.
 | `limits.token` | `per_minute: 300`, `burst: 60` | Token bucket per grant |
 | `limits.max_concurrent_per_token` | `32` | In-flight requests per grant. An open SSE stream counts as one until it ends |
 | `limits.max_in_flight` | `1024` | In-flight requests across all upstreams, open SSE streams included. Also sets `MaxConnsPerHost` of each upstream transport |
-| `limits.max_request_body` | `10485760` (10 MiB) | Request body cap in bytes, at least `1024`; larger bodies get 413. Cannot be disabled |
+| `limits.max_request_body` | `10485760` (10 MiB) | Request body cap in bytes, at least `1024`; larger bodies get 413. Cannot be disabled. With `forbidden_arguments` each in-flight POST is held in memory, so worst-case memory is a small multiple (about 3 to 4 times, body plus parse copies) of `max_in_flight` times this value; size `max_request_body` and `max_in_flight` accordingly on small hosts |
 
 Zero or unset means the default; `-1` disables that one limit (`per_minute: -1`
 for the buckets); other negative values are rejected, as is a `burst` below 0.

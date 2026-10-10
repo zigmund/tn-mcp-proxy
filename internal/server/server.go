@@ -100,8 +100,10 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Ha
 	// One re-checker for all upstreams: a shared verdict cache and one global
 	// cap on concurrent credential re-checks.
 	rechecker := proxy.NewRechecker(log)
+	// One Limits for all upstreams: a shared per-IP budget and in-flight cap.
+	limits := proxy.NewLimits(cfg.Limits, log, proxy.WithClientIP(res.ClientIP))
 	for _, up := range cfg.Upstreams {
-		ph, err := proxy.New(up, cfg.PublicURL, sealer, log, proxy.WithRechecker(rechecker))
+		ph, err := proxy.New(up, cfg.PublicURL, sealer, log, proxy.WithRechecker(rechecker), proxy.WithLimits(limits))
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: %w", up.Name, err)
 		}

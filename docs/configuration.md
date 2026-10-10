@@ -27,6 +27,7 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
 | `oauth.rate_limit.authorize_form` | `per_minute: 300`, `burst: 100` | Limit for `GET /oauth/authorize` (rendering the form; each one seals a request, hence a generous but finite limit) |
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on all `POST /oauth/authorize` requests together. See [Rate limiting](#rate-limiting) |
+| `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
 | `tls.cert_file`, `tls.key_file` | empty | PEM certificate (with chain) and private key. Set both or neither; both set enables built-in HTTPS. See [Built-in TLS](#built-in-tls) |
@@ -404,6 +405,87 @@ oauth:
 trusted_proxies: ["127.0.0.0/8", "::1/128"]
 ```
 
+## Proxy limits
+
+The top-level `limits` section bounds what one client can do on the proxied MCP
+paths (`upstreams[].path`); the OAuth endpoints have their own
+[rate limits](#rate-limiting). The section is shared by all upstreams, because
+the per-IP budget and the in-flight cap are global.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `limits.disabled` | `false` | Switches all four limits below off (the body cap stays) |
+| `limits.ip` | `per_minute: 1200`, `burst: 300` | Token bucket per client IP, checked before the bearer token is opened. IPv6 clients are also charged per `/56` and `/48` (4x and 16x the budget), as for the OAuth endpoints |
+| `limits.token` | `per_minute: 300`, `burst: 60` | Token bucket per grant |
+| `limits.max_concurrent_per_token` | `32` | In-flight requests per grant. An open SSE stream counts as one until it ends |
+| `limits.max_in_flight` | `1024` | In-flight requests across all upstreams, open SSE streams included. Also sets `MaxConnsPerHost` of each upstream transport |
+| `limits.max_request_body` | `10485760` (10 MiB) | Request body cap in bytes, at least `1024`; larger bodies get 413. Cannot be disabled |
+
+Zero or unset means the default; `-1` disables that one limit (`per_minute: -1`
+for the buckets); other negative values are rejected, as is a `burst` below 0.
+This differs from `oauth.rate_limit`, which only has the all-or-nothing
+`disabled`.
+
+- **Grant.** The per-token limits are keyed by a SHA-256 over the upstream
+  name and the credential headers (names and values) the proxy injects. One
+  set of upstream credentials is one user: the key stays the same when the
+  access token is refreshed and is shared by all OAuth clients of that user,
+  so registering more clients does not buy a fresh budget. The raw token and
+  the credential values are never used as keys or logged. (Access tokens carry no refresh
+  family id; adding one would change the token format.)
+- **Order.** Method and path checks, then the per-IP bucket (so unauthenticated
+  floods are cut before any decryption), then authentication, the body size
+  check, the per-grant bucket, per-grant concurrency and the global in-flight
+  cap. A request refused at any step gives back the tokens and slots taken by
+  the earlier ones, so a denial costs nothing at the other tiers and never
+  holds a slot. A `413` for a declared `Content-Length` over the cap also gives
+  the IP token back. The IP token of a request that fails authentication stays
+  spent, as does that of a chunked body that turns out too large mid-stream.
+- **Responses.** Per-IP, per-grant and per-grant concurrency excess: `429` with
+  `Retry-After` (the time until a token is available; `1` for concurrency).
+  Global cap: `503` with `Retry-After: 1`. The body is a plain text line, as for
+  the other proxy errors.
+- **Streams and slow calls.** The limits never time a request out. A held SSE
+  stream keeps its slots until the upstream ends it or the client disconnects.
+  **Open SSE streams count toward both `max_in_flight` and
+  `max_concurrent_per_token`**, even when idle: each is an in-flight request
+  until it ends. Size `max_concurrent_per_token` for the concurrent streams plus
+  tool calls one user may hold, and `max_in_flight` for all connected clients
+  plus their calls (the default `1024` leaves room for that many idle streams
+  before POSTs start to get `503`). Slots are also released if the handler
+  panics or the response is aborted.
+- **Global cap and queuing.** Go's `MaxConnsPerHost` makes extra requests wait
+  for a free connection, without bound. The proxy therefore enforces the same
+  number as an in-flight cap first and answers `503` instead, so the transport
+  does not queue. The cap counts requests, not connections, across upstreams;
+  each upstream's transport is limited to the same number of connections.
+  `MaxConnsPerHost` limits connections, not streams: over HTTP/1.1 a stream
+  holds a connection, but over HTTP/2 many streams share one, so there the
+  in-flight cap is what actually binds.
+- **Body cap.** 10 MiB stays the default: upstreams such as Tradernet expose
+  file-upload tools whose payload is base64 inside the JSON-RPC body, so a
+  smaller default could break real calls. Bodies are streamed, not buffered,
+  and the caps above bound how many can be in flight. Lower it if your
+  upstream takes only small messages.
+- **Logs.** A refusal is logged at `debug` (client IP only for the per-IP
+  limit) and, at most once a minute per limit, at `warn` as a count
+  (`proxy rate limit refused requests`, `proxy concurrency limit refused
+  requests`). Grants, tokens and credentials are never logged.
+- **Client IP.** The same resolver as the OAuth limits (see [Client IP](#client-ip)).
+  claude.ai calls come from shared egress addresses, which is why `limits.ip` is
+  generous; tighten `limits.token` first.
+
+```yaml
+limits:
+  ip:    { per_minute: 1200, burst: 300 }
+  token: { per_minute: 300,  burst: 60 }
+  max_concurrent_per_token: 32
+  max_in_flight: 1024
+  max_request_body: 10485760
+  # disabled: true          # all limits off except the body cap
+  # max_in_flight: -1       # or switch off just one
+```
+
 ## Transport security
 
 `public_url`, every `oauth.allowed_redirect_uris` entry and every
@@ -513,7 +595,7 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000" always;   # HSTS (the service sends it itself only with built-in TLS)
 
-    client_max_body_size 10m;           # the service rejects bodies over 10 MiB (413)
+    client_max_body_size 10m;           # the service rejects bodies over limits.max_request_body, 10 MiB by default (413)
 
     # Proxy settings at server level are inherited by both locations below
     # (proxy_set_header only while a location defines no proxy_set_header of its own).

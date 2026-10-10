@@ -426,7 +426,19 @@ end). Any other method (HEAD, OPTIONS, PUT, PATCH, TRACE, ...) gets 405 with
 `Allow: GET, POST, DELETE`, decided before authentication, so no token is
 parsed and the upstream is never contacted. OPTIONS is included: MCP clients do
 not use browser CORS preflight for this endpoint. The request body is capped at
-10 MiB (413 beyond that).
+`limits.max_request_body` (10 MiB by default; 413 beyond that).
+
+**Limits.** One shared `proxy.Limits` (`limits` config section) guards all
+upstream handlers. Per request: per-IP token bucket (before the token is
+opened) -> authentication -> body size -> per-grant token bucket -> per-grant
+concurrency slot -> global in-flight slot. The grant key is a SHA-256 over
+upstream name and the injected credential headers (access tokens carry no refresh
+family id), so it survives refresh and never exposes a credential. A refusal at
+any step refunds the earlier tokens and slots; slots are released when
+`ReverseProxy.ServeHTTP` returns, i.e. when a response or SSE stream ends or the
+client disconnects, and no deadline is imposed on either. A 413 for a declared oversize body refunds the IP token. Excess is 429 with
+`Retry-After` (per-IP, per-grant) or 503 (global cap). The global cap equals
+`Transport.MaxConnsPerHost`, enforced first so the transport never queues.
 
 **Auth.** `Authorization: Bearer <token>` (scheme case-insensitive) is opened
 as a `seal.KindAccess` token into `tokens.Access`. Checks: authentic and
@@ -553,7 +565,9 @@ errors, timeouts, 5xx and JSON-RPC errors are "unavailable" and never cause a
 | 401 | no Bearer token | `Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource<path>"` |
 | 401 | invalid, expired, wrong kind, wrong upstream, bad payload, missing credentials, upstream 401, or a tool error confirmed by the credential re-check (`validate.recheck_on_tool_error`) | `Bearer error="invalid_token", error_description="...", resource_metadata="..."` |
 | 404 | path is not exactly `path` | none |
-| 413 | request body over 10 MiB | none |
+| 413 | request body over `limits.max_request_body` (10 MiB by default) | none |
+| 429 | per-IP or per-grant rate limit, or per-grant concurrency limit; `Retry-After` set | none |
+| 503 | global in-flight cap reached; `Retry-After: 1` | none |
 | 500 | the sealer itself is broken (server bug) | none |
 | 502 | upstream unreachable or failed (logged at warn) | none |
 | 504 | upstream timeout (logged at warn) | none |

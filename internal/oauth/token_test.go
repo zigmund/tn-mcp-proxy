@@ -477,12 +477,10 @@ func TestTokenRefreshCacheOverflow(t *testing.T) {
 	_, a0 := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
 	_, b0 := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
 	_, a1 := e.wantOK(t, e.do(e.refreshForm(e.none, a0))) // family A takes the only slot
-	rec := e.do(e.refreshForm(e.none, b0))
-	e.wantErr(t, rec, http.StatusServiceUnavailable, "server_error")
-	if rec.Header().Get("Retry-After") != "" {
-		t.Error("Retry-After must not be set")
-	}
-	// A tracked family keeps rotating while the cache is full.
+	// A full cache evicts instead of failing: B is accepted, A is evicted.
+	_, b1 := e.wantOK(t, e.do(e.refreshForm(e.none, b0)))
+	e.wantOK(t, e.do(e.refreshForm(e.none, b1)))
+	// Documented trade-off: evicted A is accepted again as a new family.
 	e.wantOK(t, e.do(e.refreshForm(e.none, a1)))
 }
 
@@ -644,11 +642,11 @@ func TestFamilyCacheBoundary(t *testing.T) {
 	if _, err := c.use("f", 0, exp, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.use("g", 0, exp, now); err != errReplayCacheFull {
-		t.Fatalf("err = %v", err)
-	}
 	// At now == exp the family is dead (its newest token is expired too), so
 	// its slot is free and the same generation counts as new.
+	if _, err := c.use("f", 0, exp.Add(time.Hour), exp); err != nil {
+		t.Fatalf("at exp: err = %v", err)
+	}
 	if _, err := c.use("g", 0, exp.Add(time.Hour), exp); err != nil {
 		t.Fatalf("at exp: err = %v", err)
 	}

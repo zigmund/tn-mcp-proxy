@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"container/list"
 	"errors"
 	"sync"
 	"time"
@@ -18,12 +19,14 @@ const (
 
 	// maxFamilyEntries caps the refresh-token family cache: one entry per
 	// login chain that has refreshed at least once, living until its newest
-	// refresh token expires (30 days by default). About 120 bytes each bounds
-	// it near 12 MiB; a legitimate deployment has a handful of chains.
+	// refresh token expires (30 days by default) or until evicted as the
+	// least recently used when full. About 200 bytes each (including the
+	// list element) bounds it near 20 MiB; a legitimate deployment has a
+	// handful of chains.
 	maxFamilyEntries = 100_000
 
 	// Sweep cadence: a full scan is O(n), so it runs at most once a minute
-	// normally and at most once a second while the cache is full.
+	// normally and at most once a second while a fail-closed cache is full.
 	sweepInterval     = time.Minute
 	fullSweepInterval = time.Second
 )
@@ -31,8 +34,8 @@ const (
 var (
 	// errReplayed means the id was already redeemed.
 	errReplayed = errors.New("already used")
-	// errReplayCacheFull means no live entry could be evicted. Callers must
-	// fail closed: accepting the token untracked would allow replay.
+	// errReplayCacheFull means the code cache holds only live entries.
+	// Callers must fail closed: accepting the token untracked would allow replay.
 	errReplayCacheFull = errors.New("replay cache full")
 	// errFamilyRevoked means the refresh token family is revoked, either
 	// just now by a reuse or earlier.
@@ -98,23 +101,93 @@ func (c *replayCache) claim(id string, exp, now time.Time) error {
 
 // family is the state of one refresh token chain (one login).
 type family struct {
+	id      string
 	usedGen int64     // highest generation redeemed so far
 	exp     time.Time // expiry of the newest token issued in the chain
 	revoked bool
+	elem    *list.Element // position in the active or revoked LRU list
 }
 
 // familyCache enforces single-use refresh tokens with reuse detection, one
 // entry per chain rather than per token (so a refresh loop cannot grow it).
 // Like replayCache it is per-process and forgets everything on restart.
+//
+// Unlike replayCache it never fails closed: when full it evicts. Anyone can
+// mint logins (the authorize form accepts any credentials), so a full cache
+// must not lock legitimate users out for the refresh TTL. Each entry sits in
+// one of two intrusive LRU lists (front = most recently used):
+//   - active: evicted first, least recently used first. "Used" means created,
+//     successfully refreshed, or (for revoked ones) presented again;
+//   - revoked: evicting one re-opens its stolen tokens, so they go last. The
+//     list is capped at revokedLimit (10% of limit, at least 1) so revoked
+//     entries cannot starve the active set; beyond it the least recently
+//     used revoked entry is dropped. When the cache holds nothing but revoked
+//     entries, the least recently used of those is evicted for a new family.
+//
+// Every operation is O(1) amortized under the mutex: a hash lookup, a list
+// move or pop, plus the rate-limited O(n) expiry sweep (at most once a
+// minute) that removes dead entries.
+//
+// Accepted trade-off: reuse detection is lost for an evicted chain. A rotated
+// (old) refresh token of an evicted family is accepted once as a new family,
+// exactly as after a restart.
 type familyCache struct {
-	mu    sync.Mutex
-	seen  map[string]*family
-	sweep sweeper
-	limit int
+	mu           sync.Mutex
+	seen         map[string]*family
+	active       *list.List
+	revoked      *list.List
+	sweep        sweeper
+	limit        int
+	revokedLimit int
+
+	// Eviction accounting for rate-limited logging, see takeEvictions.
+	evicted        int
+	evictedRevoked int
+	lastReport     time.Time
 }
 
 func newFamilyCache(limit int) *familyCache {
-	return &familyCache{seen: make(map[string]*family), limit: limit}
+	limit = max(1, limit)
+	return &familyCache{
+		seen: make(map[string]*family), active: list.New(), revoked: list.New(),
+		limit: limit, revokedLimit: max(1, limit/10),
+	}
+}
+
+// evictionReportInterval bounds how often evictions are logged.
+const evictionReportInterval = time.Minute
+
+// takeEvictions returns the number of evictions since the last report (and
+// how many of them were revoked families) at most once per
+// evictionReportInterval, and zero otherwise (the count keeps accumulating).
+func (c *familyCache) takeEvictions(now time.Time) (n, revoked int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.evicted == 0 || now.Sub(c.lastReport) < evictionReportInterval {
+		return 0, 0
+	}
+	n, revoked = c.evicted, c.evictedRevoked
+	c.evicted, c.evictedRevoked, c.lastReport = 0, 0, now
+	return n, revoked
+}
+
+// remove drops f from the map and its list.
+func (c *familyCache) remove(f *family) {
+	if f.revoked {
+		c.revoked.Remove(f.elem)
+	} else {
+		c.active.Remove(f.elem)
+	}
+	delete(c.seen, f.id)
+}
+
+// evict drops the least recently used entry of l, counting it.
+func (c *familyCache) evict(l *list.List) {
+	c.remove(l.Back().Value.(*family))
+	c.evicted++
+	if l == c.revoked {
+		c.evictedRevoked++
+	}
 }
 
 // use redeems generation gen of family id and extends the family's lifetime
@@ -124,43 +197,56 @@ func newFamilyCache(limit int) *familyCache {
 //     (kept until its expiry) and errFamilyRevoked is returned;
 //   - otherwise gen is recorded as used.
 //
-// A family with no live entry is accepted as new, which is why a restart
-// reopens a window. errReplayCacheFull is returned when a new entry is needed
-// and the cache is full of live ones. The boolean reports a reuse detection
-// (as opposed to an earlier revocation) for logging.
+// A family with no live entry is accepted as new, which is why a restart or
+// an eviction reopens a window; a full cache evicts to make room, so the only
+// error is errFamilyRevoked (nil otherwise). The boolean reports a reuse
+// detection (as opposed to an earlier revocation) for logging.
 func (c *familyCache) use(id string, gen int64, newExp, now time.Time) (reuse bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	f, ok := c.seen[id]
 	if ok && !now.Before(f.exp) {
-		delete(c.seen, id) // dead: all its tokens are expired by now
+		c.remove(f) // dead: all its tokens are expired by now
 		f, ok = nil, false
 	}
 	if ok {
 		switch {
 		case f.revoked:
+			c.revoked.MoveToFront(f.elem)
 			return false, errFamilyRevoked
 		case gen <= f.usedGen:
 			f.revoked = true
+			c.active.Remove(f.elem)
+			f.elem = c.revoked.PushFront(f)
+			if c.revoked.Len() > c.revokedLimit {
+				c.evict(c.revoked) // never the one just pushed: Len > limit >= 1
+			}
 			return true, errFamilyRevoked
 		}
 		f.usedGen = gen
 		if newExp.After(f.exp) { // never shorten: older tokens may outlive newExp
 			f.exp = newExp
 		}
+		c.active.MoveToFront(f.elem)
 		return false, nil
 	}
-	if c.sweep.due(now, len(c.seen) >= c.limit) {
-		for k, v := range c.seen {
+	if c.sweep.due(now, false) {
+		for _, v := range c.seen {
 			if !now.Before(v.exp) {
-				delete(c.seen, k)
+				c.remove(v)
 			}
 		}
 	}
 	if len(c.seen) >= c.limit {
-		return false, errReplayCacheFull
+		if c.active.Len() > 0 {
+			c.evict(c.active)
+		} else {
+			c.evict(c.revoked)
+		}
 	}
-	c.seen[id] = &family{usedGen: gen, exp: newExp}
+	f = &family{id: id, usedGen: gen, exp: newExp}
+	f.elem = c.active.PushFront(f)
+	c.seen[id] = f
 	return false, nil
 }

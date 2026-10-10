@@ -218,23 +218,39 @@ pruned lazily (at most once a minute, once a second while full).
   code exchange; its first refresh token has generation `g=0` and every
   rotation issues `g+1`. The cache holds one entry per family that has
   refreshed: highest used generation, expiry (the newest token's, extended on
-  every rotation) and a revoked flag (cap 100,000, about 12 MiB). Redeeming
-  `(f, g)` is atomic: a revoked family is `invalid_grant`; `g` not greater than
-  the highest used generation is a reuse, which revokes the family (the
-  successor held by the legitimate client stops working too; logged at warn
-  with the client id only) and is `invalid_grant`; otherwise `g` is recorded
-  and the successor `g+1` issued. A refresh loop therefore touches one entry,
-  not one per request. A family with no live entry (never refreshed, or after
-  a restart) is accepted as new.
+  every rotation) and a revoked flag (cap 100,000, about 200 bytes each, near
+  20 MiB). Redeeming `(f, g)` is atomic: a revoked family is `invalid_grant`;
+  `g` not greater than the highest used generation is a reuse, which revokes
+  the family (the successor held by the legitimate client stops working too;
+  logged at warn with the client id only) and is `invalid_grant`; otherwise
+  `g` is recorded and the successor `g+1` issued. A refresh loop therefore
+  touches one entry, not one per request. A family with no live entry (never
+  refreshed, after a restart, or evicted, see Full cache) is accepted as new.
 - *Spent first:* the refresh token is spent before the new pair is sealed.
   A sealing failure, or a client that loses the response, leaves a spent
   token and the client must re-authorize. Claiming after issuing would let
   concurrent requests both succeed.
-- *Full cache:* when a cache holds the maximum of live entries the endpoint
-  fails closed with `503 server_error` (not `invalid_grant`: the client did
-  nothing wrong). There is no `Retry-After` because no honest value exists;
-  slots free up as tokens expire (minutes for codes, days for families).
-  Accepting the token untracked would defeat single-use.
+- *Full cache (codes):* when the code cache holds the maximum of live entries
+  the endpoint fails closed with `503 server_error` (not `invalid_grant`: the
+  client did nothing wrong). There is no `Retry-After` because no honest value
+  exists; slots free up as codes expire (minutes). Accepting the code
+  untracked would defeat single-use (PKCE still binds codes, and they live 5
+  minutes, so failing closed is cheap here).
+- *Full cache (refresh families):* never a 503. A new family evicts the least
+  recently used entry. "Used" means created, successfully refreshed, or, for a
+  revoked family, presented again. Entries live in two intrusive LRU lists
+  (`container/list`), so eviction is O(1) under the mutex even while an
+  attacker keeps the cache full; expired entries are swept lazily, at most
+  once a minute. Active families are evicted first. Revoked families are
+  protected only relative to active ones, because evicting one re-opens its
+  stolen tokens: they are capped at 10% of the limit (10,000; the least
+  recently used revoked entry is dropped beyond that) so they cannot starve
+  the active set. Evicting a revoked family because nothing else is left is
+  practically unreachable at the production limit. Evictions are logged at
+  warn at most once a minute with a count (never ids). Accepted trade-off:
+  reuse detection is lost for an evicted chain. A rotated (old) refresh token
+  of an evicted family is accepted once as a new family, exactly as after a
+  restart.
 
 ## Security considerations
 
@@ -255,37 +271,40 @@ pruned lazily (at most once a minute, once a second while full).
 - **Lost refresh responses.** A client that loses the response to a refresh
   request (network failure after the server spent the token) holds a spent
   token and must re-authorize.
-- **Cache filling is a DoS vector.** Registration is open and the credentials
-  form accepts any values, so anyone can create logins (one code entry each,
-  and one family entry once refreshed) until a cache is full; from then on
-  new exchanges, or first refreshes of new families, get 503 until entries
-  expire (minutes for codes, up to the refresh TTL for families). Refreshing
-  in a loop does not grow the family cache, but it needs one login per entry,
-  which makes filling it far more expensive than a per-token cache. The
-  mitigation is the in-app per-IP rate limiter on `POST /oauth/register`,
-  `POST /oauth/authorize` and `POST /oauth/token` (internal/ratelimit, wired in
+- **Cache filling.** Registration is open and the credentials form accepts any
+  values, so anyone can create logins (one code entry each, and one family
+  entry once refreshed). The code cache fails closed when full (503 until
+  codes expire, minutes); the family cache evicts (see Full cache), so
+  legitimate users never get 503 from it. The cost of flooding is that reuse
+  detection degrades: a chain is evicted once 100,000 newer families have been
+  created or refreshed since it was last touched. At the default
+  `oauth.access_token_ttl` of 1h an ordinary chain is touched about hourly, so
+  about 56 sources sustaining the default authorize limit of 30/min (100,000
+  per hour; or one IPv6 /48) can strip reuse detection from every ordinary
+  chain. User-visible impact: no lockout and no 503; the evicted client's next
+  refresh is accepted as a new family, and only reuse detection is lost (a
+  stolen, already rotated token is then not caught). The revoked quota
+  (10,000) is about 10 times cheaper to flush: roughly 10,000 own reuse
+  events, authorize-bound at about 333 IP-minutes (around 100 IPs in 3.5
+  minutes, or a /48). The least recently used, typically victim, revoked
+  families go first and their stolen tokens reopen. The flood is bounded by
+  the in-app per-IP rate limiter on `POST /oauth/register`, `POST
+  /oauth/authorize` and `POST /oauth/token` (internal/ratelimit, wired in
   internal/oauth/ratelimit.go): one token bucket per client IP (IPv6 by /64),
-  a separate bucket set per endpoint, answering 429 with `Retry-After`. The key
-  table is bounded (10 000 clients; idle entries, then the least recently seen
-  ones, are evicted, so it neither fails closed nor grows without bound). The
-  client IP comes from the resolver shared with the access log
+  a separate bucket set per endpoint, answering 429 with `Retry-After`. The
+  key table is bounded (10 000 clients; idle entries, then the least recently
+  seen ones, are evicted, so it neither fails closed nor grows without bound).
+  The client IP comes from the resolver shared with the access log
   (internal/httplog): forwarding headers are honoured only from peers in
   `trusted_proxies` (default loopback), otherwise a client could spoof its
   address. The defaults are generous because claude.ai uses shared egress
   addresses; see Rate limiting in docs/configuration.md. A reverse-proxy
-  `limit_req` stays useful as an extra layer. Known
-  limitation: the limiter raises the cost of cache filling but does not make
-  the caches safe. The authorize form accepts any credentials, the family cache
-  holds 100 000 entries and keeps each up to `oauth.refresh_token_ttl` (30
-  days by default). At the default authorize limit of 30/min one IP can create
-  about 43 000 logins a day (each then needs one token exchange and one
-  refresh, well within the token limit), so about 100 addresses fill the
-  family cache in roughly 30 minutes. A single IPv6 /48 does the same by
-  rotating through its 65 536 /64 prefixes, which also evicts the oldest
-  entries of the 10 000-key limiter table and so resets their buckets. Once
-  full, the first refresh of a new family gets 503 until entries expire. The
-  code cache (50 000 entries, 5-minute TTL) takes about 150 live codes per IP,
-  so roughly 330 addresses fill it. Further hardening is planned.
+  `limit_req` stays useful as an extra layer. Remaining cost for an attacker,
+  in addition to the above: each family needs one login, one token exchange
+  and one refresh, so one IP creates about 43 000 a day. The code cache (50
+  000 entries, 5-minute TTL) takes about 150 live codes per IP, so roughly 330
+  addresses keep it full and make new code exchanges fail with 503 for as long
+  as they sustain the flood.
 - **Access tokens are bearer and stateless.** They cannot be revoked before
   their expiry; keep `oauth.access_token_ttl` short.
 - **Credentials in tokens.** Access and refresh tokens carry the upstream

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zigmund/tn-mcp-proxy/internal/audit"
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/httplog"
 	"github.com/zigmund/tn-mcp-proxy/internal/oauth"
@@ -118,8 +119,10 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger, opts ...
 	oauth.New(cfg, sealer, log, oauth.WithClientIP(res.ClientIP), oauth.WithRejectionSource(rechecker), oauth.WithVersion(o.version)).Register(inner)
 	// One Limits for all upstreams: a shared per-IP budget and in-flight cap.
 	limits := proxy.NewLimits(cfg.Limits, log, proxy.WithClientIP(res.ClientIP))
+	// nil (disabled) unless audit.enabled; the OAuth server builds its own.
+	auditLog := audit.New(log, cfg)
 	for _, up := range cfg.Upstreams {
-		ph, err := proxy.New(up, cfg.PublicURL, sealer, log, proxy.WithRechecker(rechecker), proxy.WithLimits(limits))
+		ph, err := proxy.New(up, cfg.PublicURL, sealer, log, proxy.WithRechecker(rechecker), proxy.WithLimits(limits), proxy.WithAudit(auditLog))
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: %w", up.Name, err)
 		}

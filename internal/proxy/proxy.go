@@ -15,10 +15,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/zigmund/tn-mcp-proxy/internal/audit"
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
 	"github.com/zigmund/tn-mcp-proxy/internal/tokens"
@@ -59,6 +61,11 @@ const allowHeader = "GET, POST, DELETE"
 
 type credsKey struct{}
 
+// ipKey carries the client IP in the request context, set only when audit is
+// on, for the refusals logged from response callbacks (the outbound request
+// no longer has the client's forwarding headers).
+type ipKey struct{}
+
 type handler struct {
 	up     config.Upstream
 	target *url.URL
@@ -73,6 +80,8 @@ type handler struct {
 	rechecker *Rechecker
 	// limits holds the rate, concurrency and body limits; never nil after New.
 	limits *Limits
+	// audit writes the audit records; nil when audit.enabled is off.
+	audit *audit.Logger
 }
 
 // Option configures a handler.
@@ -87,6 +96,13 @@ func WithRechecker(r *Rechecker) Option {
 			h.rechecker = r
 		}
 	}
+}
+
+// WithAudit makes the handler write the audit log: one "request" record per
+// proxied request, and the client IP and audited credential values on its
+// refusal logs. A nil logger means audit is off.
+func WithAudit(a *audit.Logger) Option {
+	return func(h *handler) { h.audit = a }
 }
 
 // WithLimits shares one Limits (per-IP budget, per-grant state and the global
@@ -229,12 +245,111 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Held until the response, a long-lived SSE stream included, has ended or
 	// the client has gone: ReverseProxy.ServeHTTP returns then.
 	defer release()
-	if !h.inspectToolArguments(w, r, maxBody) {
+	info, ok := h.inspectToolArguments(w, r, maxBody, creds)
+	if !ok {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	h.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), credsKey{}, creds)))
+	ctx := context.WithValue(r.Context(), credsKey{}, creds)
+	if h.audit.Enabled() {
+		ip := h.limits.clientIP(r)
+		ctx = context.WithValue(ctx, ipKey{}, ip)
+		rec := &statusRecorder{ResponseWriter: w}
+		w = rec
+		// Deferred, so that the record is written exactly once when the
+		// handler returns, whatever the outcome: a long-lived SSE stream
+		// included, and an aborted copy (panic) too.
+		defer func() { h.auditRequest(ctx, ip, rec.status, r.Method, creds, info) }()
+	}
+	h.rp.ServeHTTP(w, r.WithContext(ctx))
 }
+
+// who returns the audit identification of a refusal for request r, or nil when
+// audit is off.
+func (h *handler) who(r *http.Request, creds map[string]string) []any {
+	if !h.audit.Enabled() {
+		return nil
+	}
+	return h.audit.Who(h.limits.clientIP(r), h.up, creds)
+}
+
+// whoCtx is who for a response callback: creds and IP come from the context.
+func (h *handler) whoCtx(ctx context.Context) []any {
+	if !h.audit.Enabled() {
+		return nil
+	}
+	creds, _ := ctx.Value(credsKey{}).(map[string]string)
+	ip, _ := ctx.Value(ipKey{}).(string)
+	return h.audit.Who(ip, h.up, creds)
+}
+
+// auditRequest writes the "request" audit record. status is 0 when no
+// response was written (the client left first). info is nil when the body was
+// not inspected, in which case the JSON-RPC fields are omitted.
+func (h *handler) auditRequest(ctx context.Context, ip string, status int, method string, creds map[string]string, info *bodyInfo) {
+	attrs := []slog.Attr{
+		slog.String("client_ip", ip),
+		slog.String("upstream", h.up.Name),
+		slog.String("method", method),
+		slog.Int("status", status),
+		h.audit.Creds(h.up, creds),
+	}
+	if info != nil {
+		switch {
+		case info.batch > 0:
+			// One group per call, so method and tool stay aligned and every
+			// value is its own attribute in both log formats.
+			calls := make([]any, 0, len(info.calls))
+			for i, c := range info.calls {
+				calls = append(calls, slog.Group(strconv.Itoa(i), slog.String("method", c.method), slog.String("tool", c.tool)))
+			}
+			attrs = append(attrs, slog.Int("rpc_batch", info.batch), slog.Group("rpc", calls...))
+		case len(info.calls) == 1:
+			if c := info.calls[0]; c.method != "" {
+				attrs = append(attrs, slog.String("rpc_method", c.method))
+				if c.tool != "" {
+					attrs = append(attrs, slog.String("tool", c.tool))
+				}
+			}
+		}
+	}
+	h.audit.Record(context.WithoutCancel(ctx), audit.EventRequest, attrs...)
+}
+
+// statusRecorder captures the final status code. It forwards Flush and exposes
+// the wrapped writer through Unwrap, which ReverseProxy needs to stream SSE.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.ResponseWriter.WriteHeader(code)
+	// First final status wins; 1xx other than 101 are interim responses.
+	if r.status == 0 && (code >= 200 || code == http.StatusSwitchingProtocols) {
+		r.status = code
+	}
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(p)
+}
+
+func (r *statusRecorder) Flush() { _ = r.FlushError() }
+
+// FlushError implements the optional interface ReverseProxy looks for, so a
+// flush error reaches it.
+func (r *statusRecorder) FlushError() error {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // hasContentEncoding reports whether the request declares any encoding other
 // than identity, in any header line or comma-separated list element.
@@ -307,11 +422,12 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (map[stri
 		case v == "" && c.optional:
 			continue
 		case v == "":
-			h.log.Warn("token lacks required credential", "header", c.name)
+			h.log.Warn("token lacks required credential", append([]any{"header", c.name}, h.who(r, acc.Creds)...)...)
 			h.challenge(w, "invalid_token", "token lacks required credentials")
 			return nil, false
 		case strings.ContainsAny(v, "\r\n\x00"):
-			h.log.Warn("token credential has invalid value", "header", c.name) // never the value
+			// Only the audited values of the token, escaped by slog.
+			h.log.Warn("token credential has invalid value", append([]any{"header", c.name}, h.who(r, acc.Creds)...)...)
 			h.challenge(w, "invalid_token", "token lacks required credentials")
 			return nil, false
 		}
@@ -320,7 +436,7 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (map[stri
 	// Operator allow-list: a value removed from allowed_values cuts existing
 	// tokens off. Same answer as any other invalid token.
 	if !h.up.CredsAllowed(creds) {
-		h.log.Info("token credentials not in allowed_values", "upstream", h.up.Name)
+		h.log.Info("token credentials not in allowed_values", append([]any{"upstream", h.up.Name}, h.who(r, creds)...)...)
 		h.challenge(w, "invalid_token", "token invalid")
 		return nil, false
 	}
@@ -425,7 +541,7 @@ func (h *handler) modifyResponse(resp *http.Response) error {
 		// The upstream rejected the stored credentials. Replace its challenge
 		// with ours so the client re-runs authorization and the user can
 		// enter new keys.
-		h.log.Warn("upstream rejected credentials")
+		h.log.Warn("upstream rejected credentials", h.whoCtx(resp.Request.Context())...)
 		resp.Header.Set("WWW-Authenticate", h.challengeValue("invalid_token", "upstream rejected credentials"))
 		return nil
 	}

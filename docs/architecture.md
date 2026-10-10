@@ -43,10 +43,20 @@ Packages under `internal/`:
 | `proxy` | per-upstream reverse proxy, forbidden-argument inspection, tool-error re-check, proxy limits |
 | `credcheck` | the `validate` MCP session, shared by the authorize form and the re-check |
 | `ratelimit` | keyed token buckets (with IPv6 tiers) and concurrency slots |
+| `audit` | opt-in audit log: info-level `audit` records with client IP and audited credential values |
 | `httplog` | client IP resolution from `trusted_proxies`, debug access log |
 | `server` | handler tree, `http.Server` settings, HSTS, read deadline, signals |
 | `certreload` | built-in TLS certificate hot reload |
 | `logging` | `slog` setup from `log.*` |
+
+Audit logging (`audit.enabled`) is a thin layer on top: `oauth` writes an
+`authorize` record when a code is issued and a `token` record per issued pair,
+`proxy` wraps the response writer after admission and writes one `request`
+record when the handler returns (so an SSE stream is logged once, at its end,
+with the final status), and the existing refusal logs gain the client IP and the
+audited values. Only `audit: true` credentials are ever written; the JSON-RPC
+method and tool name come from the `forbidden_arguments` inspection when it
+runs and are otherwise omitted. See [Audit log](configuration.md#audit-log).
 
 Operator-facing behavior and every config key are in
 [configuration.md](configuration.md); this document describes how the pieces work.
@@ -570,7 +580,7 @@ Go's:
   non-string `method` gets -32600 `Invalid Request`;
 - a message-level key that equals `method` or `params` only under case folding
   (`METHOD`, `paramſ`), or a key inside a `tools/call`'s `params` that equals
-  `arguments` only under case folding (`Arguments`), also gets -32600: a
+  `arguments` or `name` only under case folding (`Arguments`, `Name`), also gets -32600: a
   case-insensitive parser would read it as the structural key, so it is refused
   instead of ignored;
 - a body over the cap gets `413`.

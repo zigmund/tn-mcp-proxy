@@ -27,6 +27,8 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
 | `oauth.rate_limit.authorize_form` | `per_minute: 300`, `burst: 100` | Limit for `GET /oauth/authorize` (rendering the form; each one seals a request, hence a generous but finite limit) |
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on the `POST /oauth/authorize` submissions that are about to get a code. `burst` defaults to `per_minute`; setting `burst` needs `per_minute` too. See [Rate limiting](#rate-limiting) |
+| `audit.enabled` | `false` | Opt-in audit log tying client IPs to audited credential values. Needs `log.level` `debug` or `info`. See [Audit log](#audit-log) |
+| `audit.retention` | | Required when `audit.enabled`. Short free text, at most 64 characters, printable, no control characters (for example `12 months`). It states your retention of the audit records. The proxy does not enforce it: your log rotation does |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
@@ -79,7 +81,8 @@ in logs, `fmt`, JSON and YAML output.
 Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
 input), `optional`, `allowed_values` (optional list of accepted values, see
-[Restricting access](#restricting-access)). Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
+[Restricting access](#restricting-access)), `audit` (write the value to the
+audit log, see [Audit log](#audit-log); an error together with `secret: true`). Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
 
 `validate` fields: `tool` (required, MCP tool called with the entered
 credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
@@ -175,7 +178,7 @@ error whose `id` is null:
 |---|---|
 | Not valid UTF-8 JSON (only space, tab, CR and LF may surround it; a byte order mark or UTF-16 is refused), or not a single object or a non-empty array of objects | `-32700 Parse error` |
 | Duplicate `method` or `params` key in any message, duplicate `arguments` key in a `tools/call`, or a `method` that is not a string | `-32600 Invalid Request` |
-| A message-level key that equals `method` or `params` only under case folding (`METHOD`, `Params`, `paramſ`), or a key inside the `params` of a `tools/call` that equals `arguments` only under case folding (`Arguments`), in single messages and batch elements alike | `-32600 Invalid Request` |
+| A message-level key that equals `method` or `params` only under case folding (`METHOD`, `Params`, `paramſ`), or a key inside the `params` of a `tools/call` that equals `arguments` or `name` only under case folding (`Arguments`, `Name`), in single messages and batch elements alike | `-32600 Invalid Request` |
 | Forbidden argument name | `-32602`, `id` as above |
 | Larger than `limits.max_request_body` | `413` |
 
@@ -407,7 +410,8 @@ the start of the record's `msg`; fields in parentheses):
 | `warn` | `credential check unavailable` (`upstream`, `step`, `reason`, `err`) | Authorize-time check without a verdict (fail closed) |
 | `warn` | `credential recheck unavailable`, `upstream rejected credentials`, `upstream rejected credentials (tool error, confirmed by re-check)` | Proxy-side re-check and upstream 401 |
 | `info` | `tool call with forbidden argument rejected` (`argument`), `request body refused: not inspectable` (`reason`) | `forbidden_arguments` refusals |
-| `warn` | `refresh token reuse detected; family revoked` (`client_id`, `family`: 8 hex characters of a SHA-256) | Refresh token replay |
+| `warn` | `refresh token reuse detected; family revoked` (`upstream`, `client_id`, `family`: 8 hex characters of a SHA-256) | Refresh token replay |
+| `info` | `audit` (`event` is `authorize`, `token` or `request`) | Audit records, only with `audit.enabled`, see [Audit log](#audit-log). Some refusal events above also carry `client_ip` and `creds` then: the list is in [Audit log](#audit-log) |
 | `warn` | `global authorize ceiling reached; delaying new logins`, `proxy rate limit refused requests`, `proxy concurrency limit refused requests`, `refresh family cache full, ...` (counts, at most once a minute) | Limits hit |
 | `warn` | `oauth.rate_limit.authorize_global allows more live codes than half the code cache; ...` | Oversized configured ceiling, at startup |
 | `error` | `single-use cache full; rejecting requests`, `access token payload mismatch`, `... payload mismatch`, `sealing ...` | Fail-closed paths and server faults |
@@ -417,6 +421,69 @@ the start of the record's `msg`; fields in parentheses):
 | `warn` | `token lacks required credential` (`header`, `upstream`) | Valid token missing a required credential header |
 | `warn` | `credential check failed` (`upstream`) | Authorize-time check failed with an unclassified error |
 | `info`/`warn` | `tls certificate loaded`, `tls certificate expires soon`, `tls certificate reload failed, ...`, `reloaded`, `reload requested, nothing to reload` | Built-in TLS and SIGHUP |
+
+## Audit log
+
+When a server is open to anyone's Tradernet keys, a broker or the police may ask
+who used account X through your IP, and when. The debug access log cannot
+answer: it has no credential. The audit log can. It is off by default:
+
+```yaml
+audit:
+  enabled: true
+  retention: "12 months"     # required; your stated retention, not enforced by the proxy
+upstreams:
+  - credentials:
+      - { header: X-TN-API-Key, label: API key, audit: true }      # value is logged
+      - { header: X-TN-API-Secret, label: API secret, secret: true }
+```
+
+Records are written at `info` level with `msg` `audit` and an `event` field, so
+they are kept at the default `log.level` (`audit.enabled` is rejected with
+`warn` or `error`) and do not depend on the debug access log. Every record has
+`client_ip` (see [Client IP](#client-ip)) and `upstream`. Audited values are in
+the `creds` group, keyed by the canonical header name (`X-TN-API-Key` is logged
+as `X-Tn-Api-Key`).
+
+| `event` | Written when | Other fields |
+|---|---|---|
+| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host` |
+| `token` | a token pair is issued | `grant_type` (`authorization_code` or `refresh_token`), `client_id`, `family` |
+| `request` | a proxied MCP request ends | `method` (HTTP), `status`, `rpc_method`, `tool`; for a batch `rpc_batch` and `rpc` (`0`, `1`, ... each with `method` and `tool`) |
+
+`client_id` and `family` are 8 hex characters of a SHA-256, enough to correlate
+records (the same login keeps one `family` through its refreshes), not to
+replay anything. `request` is written once, when the handler returns, so a
+long-lived SSE stream is logged when it closes, with the final status (`0`: the
+client left before any response). `rpc_method` and `tool` are present only when
+`forbidden_arguments` is set, because that inspection already parses the body;
+the audit never parses it a second time. For a batch, `rpc_batch` is the number
+of messages and `rpc` has one entry per message, at most 8, as `rpc.0.method`,
+`rpc.0.tool`, `rpc.1.method`, ... (`tool` is empty when the message is not a
+tool call). Names are cut at 128 bytes, and control and format characters
+(bidi overrides included) are replaced with U+FFFD.
+
+```json
+{"time":"2026-10-10T12:00:00Z","level":"INFO","msg":"audit","event":"authorize","client_ip":"203.0.113.7","upstream":"tn","client_id":"9f2c41ab","redirect_host":"claude.ai","creds":{"X-Tn-Api-Key":"AAAA1111"}}
+{"time":"2026-10-10T12:00:01Z","level":"INFO","msg":"audit","event":"token","grant_type":"authorization_code","client_ip":"203.0.113.7","upstream":"tn","client_id":"9f2c41ab","family":"5db3f401","creds":{"X-Tn-Api-Key":"AAAA1111"}}
+{"time":"2026-10-10T12:00:09Z","level":"INFO","msg":"audit","event":"request","client_ip":"203.0.113.7","upstream":"tn","method":"POST","status":200,"creds":{"X-Tn-Api-Key":"AAAA1111"},"rpc_method":"tools/call","tool":"portfolio_get"}
+```
+
+The existing refusal logs (rejected credentials, `allowed_values`, forbidden
+arguments, a body that cannot be inspected, a token without a required or with
+an invalid credential, an upstream 401 including the confirmed tool-error
+re-check, refresh token reuse) gain `client_ip` and `creds` while audit is on.
+
+Never written: secret credential values, a credential with neither `secret` nor
+`audit` (the optional SID, for example), tokens, codes, request or response
+bodies, argument values and query strings. Audited values are typed by users,
+so they are written through `slog`, which quotes (text) or escapes (JSON) them:
+a value cannot add fields or lines. Forms refuse control characters anyway.
+
+**Personal data.** Other people's IPs and API keys are personal data in many
+jurisdictions. You decide how long records are kept and where the server (and
+its logs) are located; set `retention` to what you really do. The proxy never deletes anything: configure log rotation and
+expiry (journald `MaxRetentionSec`, logrotate, your log platform) to match.
 
 ## Client IP
 

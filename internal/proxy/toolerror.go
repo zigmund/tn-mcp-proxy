@@ -122,7 +122,7 @@ func (h *handler) inspectToolError(resp *http.Response) error {
 		return nil
 	}
 
-	h.log.Warn("upstream rejected credentials (tool error, confirmed by re-check)")
+	h.log.Warn("upstream rejected credentials (tool error, confirmed by re-check)", h.whoCtx(resp.Request.Context())...)
 	resp.Body = io.NopCloser(strings.NewReader(unauthorizedBody))
 	resp.StatusCode = http.StatusUnauthorized
 	resp.Status = "401 Unauthorized"

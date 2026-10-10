@@ -10,15 +10,17 @@ import (
 // logCheck logs a non-OK outcome of credChecker.check. Only fixed vocabulary
 // and the transport error are logged: never credentials or upstream text. The
 // error may contain the upstream host or IP, but never the URL path, query or
-// userinfo (the *url.Error wrapper is stripped).
-func logCheck(log *slog.Logger, upstream string, err error) {
+// userinfo (the *url.Error wrapper is stripped). who is the audit
+// identification (client IP and audited values) appended to the rejection line;
+// it is nil when audit is off.
+func logCheck(log *slog.Logger, upstream string, err error, who ...any) {
 	var ce *credcheck.CheckError
 	if !errors.As(err, &ce) {
 		log.Warn("credential check failed", "upstream", upstream)
 		return
 	}
 	if errors.Is(ce, credcheck.ErrRejected) {
-		log.Info("credentials rejected by upstream", "upstream", upstream, "step", ce.Step, "reason", ce.Reason)
+		log.Info("credentials rejected by upstream", append([]any{"upstream", upstream, "step", ce.Step, "reason", ce.Reason}, who...)...)
 		return
 	}
 	attrs := []any{"upstream", upstream, "step", ce.Step, "reason", ce.Reason}

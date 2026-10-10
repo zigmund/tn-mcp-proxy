@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zigmund/tn-mcp-proxy/internal/audit"
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/credcheck"
 	"github.com/zigmund/tn-mcp-proxy/internal/httplog"
@@ -46,6 +47,8 @@ type Server struct {
 	// verdicts, when set, is the proxy's shared re-check verdict cache: the
 	// refresh grant refuses credentials it has confirmed rejected.
 	verdicts RejectionSource
+	// audit writes the audit records; nil when audit.enabled is off.
+	audit *audit.Logger
 }
 
 // RejectionSource answers from a cache, without any upstream call, whether
@@ -101,6 +104,7 @@ func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger, opts ...Opti
 	for _, o := range opts {
 		o(s)
 	}
+	s.audit = audit.New(log, cfg)
 	s.checker = credcheck.New(s.version)
 	s.limits = newLimiters(cfg.OAuth.RateLimit, cfg.OAuth.CodeTTL, func() time.Time { return s.now() })
 	return s

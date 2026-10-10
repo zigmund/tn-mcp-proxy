@@ -257,12 +257,13 @@ pruned lazily (at most once a minute, once a second while full).
 - *Refresh tokens:* token families. Each login gets a random family id `f` at
   code exchange; its first refresh token has generation `g=0` and every
   rotation issues `g+1`. The cache holds one entry per family that has
-  refreshed: highest used generation, expiry (the newest token's, extended on
-  every rotation) and a revoked flag (cap 100,000, about 200 bytes each, near
-  20 MiB). Redeeming `(f, g)` is atomic: a revoked family is `invalid_grant`;
-  `g` not greater than the highest used generation is a reuse, which revokes
-  the family (the successor held by the legitimate client stops working too;
-  logged at warn with the client id only) and is `invalid_grant`; otherwise
+  refreshed: highest used generation and expiry (the newest token's, extended
+  on every rotation); cap 100,000, about 200 bytes each, near 20 MiB. Revoked
+  families are kept apart, see Revoked families. Redeeming `(f, g)` is atomic:
+  a revoked family is `invalid_grant`; `g` not greater than the highest used
+  generation is a reuse, which revokes the family (recorded in the revocation
+  set; the successor held by the legitimate client stops working too; logged
+  at warn with the client id only) and is `invalid_grant`; otherwise
   `g` is recorded and the successor `g+1` issued. A refresh loop therefore
   touches one entry, not one per request. A family with no live entry (never
   refreshed, after a restart, or evicted, see Full cache) is accepted as new.
@@ -270,27 +271,45 @@ pruned lazily (at most once a minute, once a second while full).
   A sealing failure, or a client that loses the response, leaves a spent
   token and the client must re-authorize. Claiming after issuing would let
   concurrent requests both succeed.
-- *Full cache (codes):* when the code cache holds the maximum of live entries
-  the endpoint fails closed with `503 server_error` (not `invalid_grant`: the
-  client did nothing wrong). There is no `Retry-After` because no honest value
-  exists; slots free up as codes expire (minutes). Accepting the code
-  untracked would defeat single-use (PKCE still binds codes, and they live 5
-  minutes, so failing closed is cheap here).
-- *Full cache (refresh families):* never a 503. A new family evicts the least
-  recently used entry. "Used" means created, successfully refreshed, or, for a
-  revoked family, presented again. Entries live in two intrusive LRU lists
-  (`container/list`), so eviction is O(1) under the mutex even while an
-  attacker keeps the cache full; expired entries are swept lazily, at most
-  once a minute. Active families are evicted first. Revoked families are
-  protected only relative to active ones, because evicting one re-opens its
-  stolen tokens: they are capped at 10% of the limit (10,000; the least
-  recently used revoked entry is dropped beyond that) so they cannot starve
-  the active set. Evicting a revoked family because nothing else is left is
-  practically unreachable at the production limit. Evictions are logged at
-  warn at most once a minute with a count (never ids). Accepted trade-off:
-  reuse detection is lost for an evicted chain. A rotated (old) refresh token
-  of an evicted family is accepted once as a new family, exactly as after a
-  restart.
+- *Full cache (codes):* the endpoint fails closed with `503 server_error`
+  (not `invalid_grant`: the client did nothing wrong) and the event is logged
+  at error. Failing open would accept an untracked code and defeat
+  single-use; PKCE and the allowlisted redirect still bind a code, but a leaked
+  code plus verifier could then be redeemed repeatedly within `code_ttl`, so
+  the cache stays the last line and refuses. The state should be
+  unreachable: a global ceiling on `POST /oauth/authorize` (see Cache filling)
+  bounds the live codes to at most half the cache. There is no `Retry-After`
+  because no honest value exists; slots free up as codes expire (minutes).
+- *Full cache (active refresh families):* never a 503 because of the LRU
+  itself (a 503 can only come from a full revocation set, see Revoked
+  families). A new family evicts the
+  least recently used entry. "Used" means created or successfully refreshed.
+  The entries live in an intrusive LRU list (`container/list`), so eviction is
+  O(1) under the mutex even while an attacker keeps the cache full; expired
+  entries are swept lazily, at most once a minute. Evictions are logged at warn
+  at most once a minute with a count (never ids). Accepted trade-off: reuse
+  detection is lost for an evicted chain. A rotated (old) refresh token of an
+  evicted family is accepted once as a new family, exactly as after a restart.
+- *Revoked families:* a reuse moves the family out of the LRU into a separate
+  revocation set: an 8-byte hash (keyed per process) of the family id plus the
+  family's refresh expiry (cap 1,000,000 entries, about 40 MiB). Revoked
+  chains are therefore not subject to LRU eviction: no number of attacker-created
+  active or revoked families pushes a revoked family out; an entry leaves the
+  set only at its natural expiry (all its tokens are dead then), pruned lazily
+  (at most once a minute, once a second while full). If the set is full of live
+  entries nothing is evicted to make room. Instead an unknown family, which
+  could be a revoked one with no record, is refused (`503`, same path as a
+  full code cache) until entries expire. "Unknown" includes active chains
+  already evicted from the LRU, which get the 503 on their next refresh while
+  the set is full; chains still in the LRU keep working.
+  This favours integrity over availability: reaching the bound takes
+  sustained abuse (see Cache filling) and it never re-opens a stolen chain
+  before its expiry. A reuse detected while the set is full is kept as a
+  flagged LRU entry that is never evicted for room and moves to the set when
+  it has room; if only flagged entries remain, new families fail closed too, so
+  memory stays bounded. While the set is full of live entries the prune that
+  looks for expired ones scans the whole map once a second, so refreshes of
+  unknown families may stall briefly.
 
 ## Security considerations
 
@@ -314,38 +333,55 @@ pruned lazily (at most once a minute, once a second while full).
 - **Cache filling.** Registration is open and, for upstreams without
   `validate`, the credentials form accepts any values (with `validate` each
   login needs credentials the upstream accepts), so anyone can create logins
-  (one code entry each, and one family entry once refreshed). The code cache fails closed when full (503 until
-  codes expire, minutes); the family cache evicts (see Full cache), so
-  legitimate users never get 503 from it. The cost of flooding is that reuse
-  detection degrades: a chain is evicted once 100,000 newer families have been
-  created or refreshed since it was last touched. At the default
-  `oauth.access_token_ttl` of 1h an ordinary chain is touched about hourly, so
-  about 56 sources sustaining the default authorize limit of 30/min (100,000
-  per hour; or one IPv6 /48) can strip reuse detection from every ordinary
-  chain. User-visible impact: no lockout and no 503; the evicted client's next
-  refresh is accepted as a new family, and only reuse detection is lost (a
-  stolen, already rotated token is then not caught). The revoked quota
-  (10,000) is about 10 times cheaper to flush: roughly 10,000 own reuse
-  events, authorize-bound at about 333 IP-minutes (around 100 IPs in 3.5
-  minutes, or a /48). The least recently used, typically victim, revoked
-  families go first and their stolen tokens reopen. The flood is bounded by
-  the in-app per-IP rate limiter on `POST /oauth/register`, `POST
-  /oauth/authorize` and `POST /oauth/token` (internal/ratelimit, wired in
-  internal/oauth/ratelimit.go): one token bucket per client IP (IPv6 by /64),
-  a separate bucket set per endpoint, answering 429 with `Retry-After`. The
-  key table is bounded (10 000 clients; idle entries, then the least recently
-  seen ones, are evicted, so it neither fails closed nor grows without bound).
-  The client IP comes from the resolver shared with the access log
-  (internal/httplog): forwarding headers are honoured only from peers in
-  `trusted_proxies` (default loopback), otherwise a client could spoof its
-  address. The defaults are generous because claude.ai uses shared egress
-  addresses; see Rate limiting in docs/configuration.md. A reverse-proxy
-  `limit_req` stays useful as an extra layer. Remaining cost for an attacker,
-  in addition to the above: each family needs one login, one token exchange
-  and one refresh, so one IP creates about 43 000 a day. The code cache (50
-  000 entries, 5-minute TTL) takes about 150 live codes per IP, so roughly 330
-  addresses keep it full and make new code exchanges fail with 503 for as long
-  as they sustain the flood.
+  (one code entry each, and one family entry once refreshed). The defences are a hierarchy of rate limits, a global
+  ceiling on code issuance and the separate revocation set (above). Rate
+  limits (internal/ratelimit, wired in internal/oauth/ratelimit.go) apply to
+  `POST /oauth/register`, `POST /oauth/authorize` and `POST /oauth/token`: one
+  token bucket per client IP and endpoint, answering 429 with `Retry-After`.
+  IPv4 is keyed by address; IPv6 is charged against its `/64`, `/56` and `/48`
+  (budgets 1x, 4x and 16x the per-`/64` default), all of which must allow the
+  request, so rotating `/64`s inside a routed prefix gets the `/48` budget, not
+  one allowance per `/64`. Each key table is bounded (10 000 clients per tier;
+  idle entries, then the least recently seen ones, are evicted, so it neither
+  fails closed nor grows without bound). The client IP comes from the resolver
+  shared with the access log (internal/httplog): forwarding headers are honoured
+  only from peers in `trusted_proxies` (default loopback), otherwise a client
+  could spoof its address. The defaults are generous because claude.ai uses
+  shared egress addresses; see Rate limiting in docs/configuration.md. A
+  reverse-proxy `limit_req` stays useful as an extra layer. Per-prefix limits
+  alone are not a ceiling for an attacker with many prefixes, so
+  `POST /oauth/authorize` also has a global token bucket derived from the code
+  cache size and `code_ttl` (`50000 / 4 / minutes(code_ttl)` per minute, 2 500
+  by default, burst of one minute): at most 15 000 codes can be live at once,
+  30% of the cache. Hitting it answers 429 with `Retry-After` and logs at warn
+  (at most once a minute).
+
+  Costs with the defaults (attacker's side; every family needs one login, one
+  token exchange and one refresh, so authorize is the binding limit):
+  - Code cache: cannot be filled through authorize; at the ceiling 15 000 of
+    50 000 slots at most. The ceiling can be saturated, which delays new
+    logins (429, recovers right after the flood stops): from IPv4 it takes
+    about 83 addresses at 30/min, or 5 to 6 IPv6 `/48`s (480/min each).
+  - Active families: a chain touched hourly (the default access token TTL) is
+    evicted once 100 000 newer families appear within the hour. One IPv6 `/48`
+    creates at most 28 800 per hour, so about 4 `/48`s, 56 IPv4 addresses, or
+    the saturated global ceiling (150 000 per hour, about 40 minutes) strip
+    reuse detection from every ordinary chain. User-visible impact: no lockout
+    and no 503; the evicted client's next refresh is accepted as a new family,
+    and only reuse detection is lost (a stolen, already rotated token is then
+    not caught).
+  - Revocations: not evictable by this. Filling the 1 000 000-entry set takes
+    1 000 000 own reuse events: about 6.7 hours with the global ceiling
+    saturated (blocking everyone else's new logins throughout), about 35 hours
+    from one `/48`; entries then live until the refresh TTL (30 days), so the
+    cost is sustained but affordable for a determined attacker. The outcome is
+    not a resurrected chain but 503 for unknown families (first refresh of new
+    logins) until entries expire; so do active chains already evicted from the LRU,
+    while chains still in it keep refreshing.
+    Raising `oauth.rate_limit.authorize_global` or the per-prefix limits
+    shortens these times proportionally.
+  - Rotation across many `/48`s (for example a whole `/32`) multiplies the
+    per-prefix allowance; only the global ceiling bounds that.
 - **Access tokens are bearer and stateless.** They cannot be revoked before
   their expiry; keep `oauth.access_token_ttl` short.
 - **Credentials in tokens.** Access and refresh tokens carry the upstream

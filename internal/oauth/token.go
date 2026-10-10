@@ -210,7 +210,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID s
 		grant("code replayed")
 		return
 	default:
-		s.cacheFull(w, "authorization code")
+		s.cacheFull(w, "authorization code", &s.codes.full)
 		return
 	}
 	// A new login chain starts here; it only enters the family cache when
@@ -269,11 +269,11 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		newExp = old
 	}
 	reuse, err := s.families.use(rt.Family, rt.Gen, newExp, now)
-	// Report evictions on every path (a reuse can evict a revoked entry).
-	if n, revoked := s.families.takeEvictions(now); n > 0 {
+	// Report evictions on every path.
+	if n := s.families.takeEvictions(now); n > 0 {
 		// Rate limited by the cache; counts only, never ids.
 		s.log.Warn("refresh family cache full, evicting least recently used families",
-			"evicted_since_last_log", n, "of_which_revoked", revoked)
+			"evicted_since_last_log", n)
 	}
 	switch {
 	case err == nil:
@@ -284,10 +284,16 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		}
 		grant("family revoked")
 		return
+	case errors.Is(err, errRevocationsFull):
+		// The revocation set holds only live entries: an unknown family (a new
+		// login, or an active chain evicted from the LRU) might be a revoked
+		// one with no record, so fail closed.
+		s.cacheFull(w, "refresh token", &s.families.full)
+		return
 	default:
-		// families.use only fails with errFamilyRevoked (a full cache evicts),
-		// so this is unreachable; still never issue a token untracked.
-		s.cacheFull(w, "refresh token")
+		// Unreachable (use returns only the two errors above); still never
+		// issue a token untracked.
+		s.cacheFull(w, "refresh token", &s.families.full)
 		return
 	}
 	s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1)
@@ -298,8 +304,11 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 // client did nothing wrong). There is no Retry-After because no honest
 // value exists: entries free up only as tokens expire (minutes for codes,
 // days for refresh families).
-func (s *Server) cacheFull(w http.ResponseWriter, what string) {
-	s.log.Warn("single-use cache full; rejecting request", "kind", what)
+func (s *Server) cacheFull(w http.ResponseWriter, what string, fc *fullCounter) {
+	// At most one line a minute, with the number of refusals since the last.
+	if n := fc.take(s.now()); n > 0 {
+		s.log.Error("single-use cache full; rejecting requests", "kind", what, "rejected_since_last_log", n)
+	}
 	s.tokenError(w, http.StatusServiceUnavailable, codeServerError, "temporarily unavailable")
 }
 

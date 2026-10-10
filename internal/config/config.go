@@ -162,6 +162,10 @@ type RateLimit struct {
 	Register  Limit `yaml:"register"`  // POST /oauth/register
 	Authorize Limit `yaml:"authorize"` // POST /oauth/authorize
 	Token     Limit `yaml:"token"`     // POST /oauth/token
+
+	// AuthorizeGlobal is the unkeyed ceiling on all POST /oauth/authorize
+	// requests together. Zero values mean a default derived from code_ttl.
+	AuthorizeGlobal Limit `yaml:"authorize_global"`
 }
 
 // Limit is one endpoint's bucket: sustained PerMinute requests, bursts up to Burst.
@@ -491,6 +495,7 @@ func (c *Config) validate() []error {
 		{"register", c.OAuth.RateLimit.Register},
 		{"authorize", c.OAuth.RateLimit.Authorize},
 		{"token", c.OAuth.RateLimit.Token},
+		{"authorize_global", c.OAuth.RateLimit.AuthorizeGlobal},
 	} {
 		if l.v.PerMinute < 0 {
 			add("oauth.rate_limit.%s.per_minute: must not be negative", l.field)
@@ -498,6 +503,10 @@ func (c *Config) validate() []error {
 		if l.v.Burst < 0 {
 			add("oauth.rate_limit.%s.burst: must not be negative", l.field)
 		}
+	}
+
+	if g := c.OAuth.RateLimit.AuthorizeGlobal; g.PerMinute == 0 && g.Burst > 0 {
+		add("oauth.rate_limit.authorize_global.burst: needs per_minute to be set too")
 	}
 
 	c.TrustedNets = c.TrustedNets[:0]

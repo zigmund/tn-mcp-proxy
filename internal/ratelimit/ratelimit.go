@@ -39,6 +39,10 @@ type Limiter struct {
 	entries   map[string]*list.Element // value: *entry
 	lru       *list.List               // front = most recently seen
 	lastSweep time.Time
+
+	// Denial accounting for rate-limited logging, see TakeDenied.
+	denied     int
+	lastReport time.Time
 }
 
 type entry struct {
@@ -100,8 +104,35 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 		e.tokens--
 		return true, 0
 	}
+	l.denied++
 	wait := time.Duration((1 - e.tokens) / l.rate * float64(time.Second))
 	return false, max(wait, time.Millisecond)
+}
+
+// Refund gives key one token back (capped at the burst), undoing an Allow
+// whose request was refused for another reason. An unknown (evicted) key is
+// ignored: it would be a full bucket anyway.
+func (l *Limiter) Refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if el, ok := l.entries[key]; ok {
+		e := el.Value.(*entry) //nolint:forcetypeassert // only *entry is stored
+		e.tokens = min(l.burst, e.tokens+1)
+	}
+}
+
+// TakeDenied returns the number of denials since the last report, at most
+// once per interval, and zero otherwise (the count keeps accumulating). It
+// lets callers log throttling without a log line per request.
+func (l *Limiter) TakeDenied(now time.Time, interval time.Duration) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.denied == 0 || now.Sub(l.lastReport) < interval {
+		return 0
+	}
+	n := l.denied
+	l.denied, l.lastReport = 0, now
+	return n
 }
 
 // Len returns the number of tracked keys.
@@ -148,22 +179,57 @@ func (l *Limiter) remove(el *list.Element) {
 	l.lru.Remove(el)
 }
 
-// Key maps a client IP (as text) to a limiter key: IPv4 and IPv4-mapped IPv6
-// addresses map to themselves, other IPv6 addresses to their /64 prefix, since
-// one attacker typically controls a whole /64. Text that is not an IP is
-// returned unchanged.
-func Key(ip string) string {
+// Budget multipliers of the IPv6 aggregate tiers relative to the per-/64
+// budget. A /56 or /48 is one site or ISP customer, so it may hold several
+// legitimate clients, but not the unbounded number of /64s an attacker with a
+// routed prefix can rotate through.
+const (
+	Scale56 = 4
+	Scale48 = 16
+)
+
+// Key maps a client IP (as text) to its finest limiter key: IPv4 and
+// IPv4-mapped IPv6 addresses map to themselves, other IPv6 addresses to their
+// /64 prefix. Text that is not an IP is returned unchanged.
+func Key(ip string) string { return Keys(ip)[0] }
+
+// Keys maps a client IP (as text) to the limiter keys it is charged against,
+// finest first: one key (the address) for IPv4 and IPv4-mapped IPv6, and the
+// /64, /56 and /48 prefixes for other IPv6 addresses. Text that is not an IP
+// is returned as the only key. The keys of different tiers never collide.
+func Keys(ip string) []string {
 	a, err := netip.ParseAddr(ip)
 	if err != nil {
-		return ip
+		return []string{ip}
 	}
 	a = a.Unmap().WithZone("")
 	if a.Is4() {
-		return a.String()
+		return []string{a.String()}
 	}
-	p, err := a.Prefix(64)
-	if err != nil { // unreachable: 64 is valid for IPv6
-		return a.String()
+	keys := make([]string, 0, 3)
+	for _, bits := range [...]int{64, 56, 48} {
+		p, err := a.Prefix(bits)
+		if err != nil { // unreachable: valid for IPv6
+			return []string{a.String()}
+		}
+		keys = append(keys, p.String())
 	}
-	return p.String()
+	return keys
+}
+
+// Charge takes one token from limiters[i] for keys[i] (up to the shorter of
+// the two) and allows the request only if every tier has one. On a denial the
+// tokens already taken are refunded, so a refused request costs nothing, and
+// the returned delay is the denying tier's.
+func Charge(limiters []*Limiter, keys []string) (ok bool, retryAfter time.Duration) {
+	n := min(len(limiters), len(keys))
+	for i := range n {
+		if ok, wait := limiters[i].Allow(keys[i]); !ok {
+			for j := range i {
+				limiters[j].Refund(keys[j])
+			}
+			return false, wait
+		}
+	}
+	return true, 0
 }

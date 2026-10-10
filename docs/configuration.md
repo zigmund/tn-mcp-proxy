@@ -23,6 +23,7 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.register` | `per_minute: 60`, `burst: 30` | Limit for `POST /oauth/register` |
 | `oauth.rate_limit.token` | `per_minute: 300`, `burst: 100` | Limit for `POST /oauth/token` |
 | `oauth.rate_limit.authorize` | `per_minute: 30`, `burst: 10` | Limit for `POST /oauth/authorize` (the credentials form submission) |
+| `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on all `POST /oauth/authorize` requests together. See [Rate limiting](#rate-limiting) |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
 | `tls.cert_file`, `tls.key_file` | empty | PEM certificate (with chain) and private key. Set both or neither; both set enables built-in HTTPS. See [Built-in TLS](#built-in-tls) |
@@ -213,12 +214,39 @@ once. Each endpoint has its own bucket set. `GET /oauth/authorize`, the
 metadata documents, `/healthz`, CORS preflights, non-POST requests to the token
 endpoint (a plain 405) and the proxied MCP paths are not limited.
 
-IPv4 clients are keyed by address and IPv6 clients by their `/64` prefix (one
-attacker usually controls a whole `/64`). The key table holds at most 10 000
-clients: when full, buckets that have already refilled are dropped, and
-otherwise the least recently seen client is evicted. A new client is therefore
-never refused because of table size; a flood of distinct addresses can only
-reset the buckets of the oldest clients.
+IPv4 clients are keyed by address. IPv6 clients are charged against three
+buckets per endpoint, their `/64`, `/56` and `/48` prefix, and a request passes
+only if all three allow it (a refused request costs no tokens). The configured
+`per_minute` and `burst` are the `/64` budget; the `/56` bucket gets 4 times
+and the `/48` bucket 16 times that, so a site with a few clients behind one
+prefix is not squeezed, while rotating through the `/64`s of a routed prefix
+stops at the `/48` budget instead of getting a fresh allowance per `/64`. With
+the defaults, `authorize` allows 30/min (burst 10) per `/64`, 120/min (burst 40)
+per `/56` and 480/min (burst 160) per `/48`. There is deliberately no IPv4
+aggregate (for example a `/24`): IPv4 addresses are scarce and costly to rotate,
+and the shared egress ranges of claude.ai and ChatGPT would then all share one
+bucket. Each tier's key table holds at most 10 000 clients: when full, buckets
+that have already refilled are dropped, and otherwise the least recently seen
+client is evicted. A new client is therefore never refused because of table
+size; a flood of distinct addresses can only reset the buckets of the oldest
+clients (a hot `/48` stays in its table).
+
+`POST /oauth/authorize` additionally passes a global, unkeyed token bucket
+(`oauth.rate_limit.authorize_global`, `per_minute` and `burst`). Left at `0` it
+is derived so that the single-use code cache (50 000 entries) cannot fill: with
+`m` = `oauth.code_ttl` rounded up to whole minutes (at least 1), `per_minute =
+burst = 50000 / 4 / m`, which is 2 500 for the default 5 minutes (a longer `code_ttl`
+lowers it: 1 250 at `10m`). A code occupies a cache slot for at most `code_ttl`,
+so at most `burst + per_minute * m`, at most half the cache (15 000 live codes
+by default), exist at once. The price is that a flood from many sources can
+make new logins wait (429 with `Retry-After`) instead of filling the cache;
+that clears as soon as the flood stops. Raise it only if you really expect
+more than that many logins per minute; a value above the derived one gives up
+the cache guarantee, and a warning is logged at startup when the configured
+value allows more than half the cache (`burst + per_minute * m` live codes). The
+derived default satisfies that bound for `code_ttl` up to about 17 days. `burst`
+needs `per_minute` to be set too. When the ceiling is hit it is logged once a minute at
+`warn` (`global authorize ceiling reached`, with a count of refused requests).
 
 A limited request gets `429 Too Many Requests` with `Retry-After` (whole
 seconds, rounded up):
@@ -231,7 +259,7 @@ seconds, rounded up):
 - authorize: the HTML error page ("Too many requests. ..."); the user agent is
   never redirected to the client.
 
-Each hit is logged at `debug` as `rate limit exceeded` (endpoint, client IP,
+Each per-client hit is logged at `debug` as `rate limit exceeded` (endpoint, client IP,
 retry delay; never the query, headers or body), and the 429 shows up in the
 access log.
 
@@ -245,6 +273,7 @@ oauth:
     register:  { per_minute: 60,  burst: 30 }
     token:     { per_minute: 300, burst: 100 }
     authorize: { per_minute: 30,  burst: 10 }
+    # authorize_global: { per_minute: 2500, burst: 2500 }  # default: derived from code_ttl
     # disabled: true
 trusted_proxies: ["127.0.0.0/8", "::1/128"]
 ```

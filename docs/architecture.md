@@ -573,8 +573,6 @@ Go's:
   `arguments` only under case folding (`Arguments`), also gets -32600: a
   case-insensitive parser would read it as the structural key, so it is refused
   instead of ignored;
-- a body with a `Content-Encoding` other than `identity` cannot be inspected
-  and gets `415`;
 - a body over the cap gets `413`.
 
 Well-formed messages with other methods, and messages without a `method` (JSON-RPC
@@ -587,7 +585,7 @@ and, for a forbidden argument, its configured name, never values.
 
 **Limits.** One shared `proxy.Limits` (`limits` config section) guards all
 upstream handlers. Per request: per-IP token bucket (before the token is
-opened) -> authentication -> body size -> per-grant token bucket -> per-grant
+opened) -> authentication -> body size -> content encoding -> per-grant token bucket -> per-grant
 concurrency slot -> global in-flight slot. The grant key is a SHA-256 over
 upstream name and the required credential headers only (access tokens carry no
 refresh family id), so it survives refresh and never exposes a credential.
@@ -595,9 +593,11 @@ Optional credentials (for example the Tradernet SID, which `validate` does not
 check) are left out: varying them does not buy a fresh budget. A refusal at
 any step refunds the earlier tokens and slots; slots are released when
 `ReverseProxy.ServeHTTP` returns, i.e. when a response or SSE stream ends or the
-client disconnects, and no deadline is imposed on either. A 413 for a declared oversize body refunds the IP token. Excess is 429 with
-`Retry-After` (per-IP, per-grant) or 503 (global cap). The global cap equals
-`Transport.MaxConnsPerHost`, enforced first so the transport never queues.
+client disconnects, and no deadline is imposed on either. A 413 for a declared
+oversize body and a 415 for a non-identity `Content-Encoding` refund the IP
+token. Excess is 429 with `Retry-After` (per-IP, per-grant) or 503 (global
+cap). The global cap equals `Transport.MaxConnsPerHost`, enforced first so the
+transport never queues.
 
 **Auth.** `Authorization: Bearer <token>` (scheme case-insensitive) is opened
 as a `seal.KindAccess` token into `tokens.Access`. Checks: authentic and
@@ -624,9 +624,10 @@ make it reflect or misuse the injected credentials, with arbitrary headers.
 `Origin` is forwarded because MCP servers validate it and that decision
 belongs to the upstream. `Content-Length` and `Transfer-Encoding` are derived
 by net/http from the request. `Content-Encoding` is not forwarded and
-compressed request bodies are not supported: with `forbidden_arguments` they are
-refused with 415; without it the body reaches the upstream with no encoding
-header. A client that sends no `User-Agent` gets none
+compressed request bodies are not supported: a request with any
+`Content-Encoding` other than `identity` (header lines and comma lists are all
+checked, case-insensitively) is refused with 415 for every upstream, after
+authentication and before it takes a rate or concurrency slot. A client that sends no `User-Agent` gets none
 upstream (Go's default is not substituted). Then the token's credentials are
 set, after `ReverseProxy` removes hop-by-hop headers (including any header
 named in `Connection:`, even an allow-listed one), so a `Connection:` header
@@ -739,7 +740,7 @@ errors, timeouts, 5xx and JSON-RPC errors are "unavailable" and never cause a
 | 404 | path is not exactly `path` | none |
 | 405 | method other than POST, GET, DELETE; `Allow: GET, POST, DELETE` | none |
 | 413 | request body over `limits.max_request_body` (10 MiB by default) | none |
-| 415 | `forbidden_arguments` set and the body has a `Content-Encoding` other than `identity` | none |
+| 415 | `Content-Encoding` other than `identity` (any upstream) | none |
 | 429 | per-IP or per-grant rate limit, or per-grant concurrency limit; `Retry-After` set | none |
 | 503 | global in-flight cap reached; `Retry-After: 1` | none |
 | 500 | the sealer itself is broken (server bug) | none |

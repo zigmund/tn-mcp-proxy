@@ -198,7 +198,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Order: method and path (above, free) -> per-IP rate (before the token is
 	// opened, so unauthenticated floods are cut cheaply) -> authentication ->
-	// body size -> per-grant rate -> per-grant concurrency -> global in-flight
+	// body size -> content encoding -> per-grant rate -> per-grant concurrency -> global in-flight
 	// cap. A refusal gives back everything taken before it.
 	ipKeys, ok := h.limits.chargeIP(w, r)
 	if !ok {
@@ -214,6 +214,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	if hasContentEncoding(r.Header) {
+		// Content-Encoding is not forwarded, so the upstream would receive
+		// unlabelled compressed bytes; nor can such a body be inspected.
+		h.limits.refundIP(ipKeys)
+		h.log.Debug("request with content-encoding refused")
+		http.Error(w, "content-encoding not supported", http.StatusUnsupportedMediaType)
+		return
+	}
 	release, ok := h.limits.admit(w, ipKeys, grantKey(h.up.Name, h.grantCreds(creds)))
 	if !ok {
 		return
@@ -226,6 +234,19 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	h.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), credsKey{}, creds)))
+}
+
+// hasContentEncoding reports whether the request declares any encoding other
+// than identity, in any header line or comma-separated list element.
+func hasContentEncoding(hdr http.Header) bool {
+	for _, v := range hdr.Values("Content-Encoding") {
+		for _, enc := range strings.Split(v, ",") {
+			if enc = strings.TrimSpace(enc); enc != "" && !strings.EqualFold(enc, "identity") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // grantCreds returns the credentials that identify the grant for the per-grant

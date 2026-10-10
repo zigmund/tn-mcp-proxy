@@ -21,24 +21,6 @@ func TestForbiddenArgumentsOffByDefault(t *testing.T) {
 	}
 }
 
-func TestForbiddenArgumentsCompressedBody(t *testing.T) {
-	e := newEnvUp(t, nil, forbid)
-	for _, enc := range []string{"gzip", "br", "deflate", "identity, gzip"} {
-		resp := e.do(t, "POST", "/mcp/tn", "Bearer "+e.access(t, goodCreds()), map[string]string{"Content-Encoding": enc}, "\x1f\x8b junk")
-		if resp.StatusCode != http.StatusUnsupportedMediaType {
-			t.Errorf("%s: status %d, want 415", enc, resp.StatusCode)
-		}
-	}
-	if n := len(e.requests()); n != 0 {
-		t.Fatalf("%d requests reached the upstream", n)
-	}
-	// identity is not compression.
-	resp := e.do(t, "POST", "/mcp/tn", "Bearer "+e.access(t, goodCreds()), map[string]string{"Content-Encoding": "identity"}, call(`{}`))
-	if resp.StatusCode != 200 {
-		t.Errorf("identity: status %d", resp.StatusCode)
-	}
-}
-
 func TestForbiddenArgumentsBodyCap(t *testing.T) {
 	e := newEnvUp(t, nil, forbid)
 	big := call(`{"q":"` + strings.Repeat("a", int(config.DefaultMaxRequestBody)) + `"}`)

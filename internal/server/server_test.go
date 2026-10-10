@@ -102,6 +102,94 @@ func TestRouting(t *testing.T) {
 	}
 }
 
+func handlerFor(t *testing.T, yaml string, logw io.Writer) http.Handler {
+	t.Helper()
+	cfg, err := config.Parse([]byte(yaml), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := seal.New(cfg.Secrets.Keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := Handler(cfg, sealer, slog.New(slog.NewTextHandler(logw, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func postFrom(h http.Handler, path, remote string, hdr map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(""))
+	req.RemoteAddr = remote
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestTokenEndpointRateLimited(t *testing.T) {
+	var logs bytes.Buffer
+	h := handlerFor(t, testYAML+"oauth:\n  rate_limit:\n    token: { per_minute: 60, burst: 3 }\n", &logs)
+	for i := range 3 {
+		if rec := postFrom(h, "/oauth/token", "192.0.2.10:1", nil); rec.Code != http.StatusBadRequest {
+			t.Fatalf("request %d = %d, want 400 (empty body reaches the handler)", i, rec.Code)
+		}
+	}
+	rec := postFrom(h, "/oauth/token", "192.0.2.10:1", nil)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("got %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	if !strings.Contains(rec.Body.String(), "temporarily_unavailable") {
+		t.Errorf("body = %s", rec.Body.String())
+	}
+	// Another client is unaffected; healthz and metadata are never limited.
+	if rec := postFrom(h, "/oauth/token", "192.0.2.11:1", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("other IP = %d", rec.Code)
+	}
+	for range 10 {
+		if rec := get(t, h, http.MethodGet, "/healthz"); rec.Code != 200 {
+			t.Fatalf("healthz = %d", rec.Code)
+		}
+		if rec := get(t, h, http.MethodGet, "/.well-known/oauth-authorization-server"); rec.Code != 200 {
+			t.Fatalf("metadata = %d", rec.Code)
+		}
+	}
+	// The limiter and the access log must agree on the client IP.
+	if !strings.Contains(logs.String(), "remote=192.0.2.10") {
+		t.Errorf("access log lacks the client IP: %s", logs.String())
+	}
+}
+
+func TestRateLimitHonoursTrustedProxies(t *testing.T) {
+	yaml := testYAML + "oauth:\n  rate_limit:\n    token: { per_minute: 60, burst: 1 }\ntrusted_proxies: [\"198.51.100.0/24\"]\n"
+	h := handlerFor(t, yaml, io.Discard)
+	xff := func(ip string) map[string]string { return map[string]string{"X-Forwarded-For": ip} }
+	postFrom(h, "/oauth/token", "198.51.100.1:1", xff("203.0.113.1"))
+	if rec := postFrom(h, "/oauth/token", "198.51.100.2:1", xff("203.0.113.1")); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("same client behind a trusted proxy = %d, want 429", rec.Code)
+	}
+	if rec := postFrom(h, "/oauth/token", "198.51.100.2:1", xff("203.0.113.2")); rec.Code == http.StatusTooManyRequests {
+		t.Error("distinct client behind a trusted proxy limited")
+	}
+	// Loopback is not trusted under this config: the header is ignored.
+	postFrom(h, "/oauth/token", "127.0.0.1:1", xff("203.0.113.50"))
+	if rec := postFrom(h, "/oauth/token", "127.0.0.1:2", xff("203.0.113.51")); rec.Code != http.StatusTooManyRequests {
+		t.Error("untrusted peer's header was honoured")
+	}
+}
+
+func TestRateLimitDisabledInServer(t *testing.T) {
+	h := handlerFor(t, testYAML+"oauth:\n  rate_limit:\n    disabled: true\n    token: { burst: 1 }\n", io.Discard)
+	for i := range 20 {
+		if rec := postFrom(h, "/oauth/token", "192.0.2.10:1", nil); rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d limited although disabled", i)
+		}
+	}
+}
+
 func TestServeGracefulShutdown(t *testing.T) {
 	s := newTestServer(t, io.Discard)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

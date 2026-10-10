@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
+	"github.com/zigmund/tn-mcp-proxy/internal/httplog"
+	"github.com/zigmund/tn-mcp-proxy/internal/ratelimit"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
 )
 
@@ -32,15 +34,42 @@ type Server struct {
 	// single-use (per process, see replayCache and familyCache).
 	codes    *replayCache
 	families *familyCache
+	// clientIP resolves the client address for rate limiting; limits is nil
+	// when rate limiting is disabled.
+	clientIP func(*http.Request) string
+	limits   map[string]*ratelimit.Limiter
+}
+
+// Option configures a Server.
+type Option func(*Server)
+
+// WithClientIP sets the client IP resolver used for rate limiting. The default
+// trusts only loopback proxies; the server passes the shared httplog.Resolver
+// so that logs and limits agree.
+func WithClientIP(fn func(*http.Request) string) Option {
+	return func(s *Server) {
+		if fn != nil {
+			s.clientIP = fn
+		}
+	}
 }
 
 // New builds a Server. A nil sealer is tolerated only for metadata-only use:
 // endpoints that seal or open tokens fail with a server error.
-func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) *Server {
+func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{cfg: cfg, sealer: sealer, log: log, now: time.Now, codes: newReplayCache(maxReplayEntries), families: newFamilyCache(maxFamilyEntries)}
+	s := &Server{
+		cfg: cfg, sealer: sealer, log: log, now: time.Now,
+		codes: newReplayCache(maxReplayEntries), families: newFamilyCache(maxFamilyEntries),
+		clientIP: httplog.NewResolver(cfg.TrustedNets).ClientIP,
+	}
+	for _, o := range opts {
+		o(s)
+	}
+	s.limits = newLimiters(cfg.OAuth.RateLimit, func() time.Time { return s.now() })
+	return s
 }
 
 // Register mounts the implemented endpoints on mux.
@@ -51,9 +80,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 		mux.Handle("OPTIONS "+d.path, preflight("GET, HEAD, OPTIONS"))
 	}
 	mux.HandleFunc("GET "+PathAuthorize, s.handleAuthorize) // also matches HEAD
-	mux.HandleFunc("POST "+PathAuthorize, s.handleAuthorize)
-	mux.HandleFunc("POST "+PathRegister, s.handleRegister)
+	// Rate limiting applies to POST only (see ratelimit.go).
+	mux.Handle("POST "+PathAuthorize, s.limit("authorize", s.denyAuthorize, http.HandlerFunc(s.handleAuthorize)))
+	mux.Handle("POST "+PathRegister, s.limit("register", s.denyRegister, http.HandlerFunc(s.handleRegister)))
 	mux.Handle("OPTIONS "+PathRegister, preflight("POST, OPTIONS"))
 	// All methods are routed so that even a 405 carries the token headers.
-	mux.HandleFunc(PathToken, s.handleToken)
+	mux.Handle(PathToken, s.limit("token", s.denyToken, http.HandlerFunc(s.handleToken)))
 }

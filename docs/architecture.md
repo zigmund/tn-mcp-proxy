@@ -262,11 +262,30 @@ pruned lazily (at most once a minute, once a second while full).
   expire (minutes for codes, up to the refresh TTL for families). Refreshing
   in a loop does not grow the family cache, but it needs one login per entry,
   which makes filling it far more expensive than a per-token cache. The
-  mitigation is rate limiting at the reverse proxy (`limit_req` on `/oauth/`,
-  see the reverse proxy snippet in docs/configuration.md) and a planned in-app
-  per-IP limiter. Until that
-  exists the residual risk is real: a determined attacker with many source
-  addresses can degrade token issuance.
+  mitigation is the in-app per-IP rate limiter on `POST /oauth/register`,
+  `POST /oauth/authorize` and `POST /oauth/token` (internal/ratelimit, wired in
+  internal/oauth/ratelimit.go): one token bucket per client IP (IPv6 by /64),
+  a separate bucket set per endpoint, answering 429 with `Retry-After`. The key
+  table is bounded (10 000 clients; idle entries, then the least recently seen
+  ones, are evicted, so it neither fails closed nor grows without bound). The
+  client IP comes from the resolver shared with the access log
+  (internal/httplog): forwarding headers are honoured only from peers in
+  `trusted_proxies` (default loopback), otherwise a client could spoof its
+  address. The defaults are generous because claude.ai uses shared egress
+  addresses; see Rate limiting in docs/configuration.md. A reverse-proxy
+  `limit_req` stays useful as an extra layer. Known
+  limitation: the limiter raises the cost of cache filling but does not make
+  the caches safe. The authorize form accepts any credentials, the family cache
+  holds 100 000 entries and keeps each up to `oauth.refresh_token_ttl` (30
+  days by default). At the default authorize limit of 30/min one IP can create
+  about 43 000 logins a day (each then needs one token exchange and one
+  refresh, well within the token limit), so about 100 addresses fill the
+  family cache in roughly 30 minutes. A single IPv6 /48 does the same by
+  rotating through its 65 536 /64 prefixes, which also evicts the oldest
+  entries of the 10 000-key limiter table and so resets their buckets. Once
+  full, the first refresh of a new family gets 503 until entries expire. The
+  code cache (50 000 entries, 5-minute TTL) takes about 150 live codes per IP,
+  so roughly 330 addresses fill it. Further hardening is planned.
 - **Access tokens are bearer and stateless.** They cannot be revoked before
   their expiry; keep `oauth.access_token_ttl` short.
 - **Credentials in tokens.** Access and refresh tokens carry the upstream

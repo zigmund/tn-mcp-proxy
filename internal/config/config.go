@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,6 +32,16 @@ const (
 	DefaultCodeTTL         = 5 * time.Minute
 	DefaultReloadInterval  = time.Minute
 
+	// Default per-IP rate limits of the OAuth endpoints (requests per minute
+	// and burst). They are generous because claude.ai calls register and token
+	// from shared egress addresses.
+	DefaultRegisterPerMinute  = 60
+	DefaultRegisterBurst      = 30
+	DefaultTokenPerMinute     = 300
+	DefaultTokenBurst         = 100
+	DefaultAuthorizePerMinute = 30
+	DefaultAuthorizeBurst     = 10
+
 	// KeySize is the required decoded size of every token key (AES-256).
 	KeySize = 32
 )
@@ -42,6 +53,10 @@ func DefaultRedirectURIs() []string {
 		"https://claude.com/api/mcp/auth_callback",
 	}
 }
+
+// DefaultTrustedProxies returns the trusted_proxies used when none are
+// configured: loopback only (a reverse proxy on the same host).
+func DefaultTrustedProxies() []string { return []string{"127.0.0.0/8", "::1/128"} }
 
 // reservedPrefixes are paths owned by the service itself.
 var reservedPrefixes = []string{"/oauth", "/.well-known", "/healthz"}
@@ -77,6 +92,12 @@ type Config struct {
 	OAuth     OAuth      `yaml:"oauth"`
 	Upstreams []Upstream `yaml:"upstreams"`
 	TLS       TLS        `yaml:"tls"`
+
+	// TrustedProxies lists the CIDRs (or bare IPs) of reverse proxies whose
+	// X-Forwarded-For / X-Real-IP headers are honoured. Empty means loopback.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// TrustedNets is TrustedProxies parsed and masked. Filled by Parse.
+	TrustedNets []netip.Prefix `yaml:"-"`
 }
 
 // Log configures logging.
@@ -121,6 +142,38 @@ type OAuth struct {
 	RefreshTokenTTL     time.Duration `yaml:"refresh_token_ttl"`
 	CodeTTL             time.Duration `yaml:"code_ttl"`
 	AllowedRedirectURIs []string      `yaml:"allowed_redirect_uris"`
+	RateLimit           RateLimit     `yaml:"rate_limit"`
+}
+
+// RateLimit configures the per-IP token-bucket limits of the OAuth endpoints.
+// Zero or unset values mean the defaults; negative values are errors.
+type RateLimit struct {
+	Disabled  bool  `yaml:"disabled"`
+	Register  Limit `yaml:"register"`  // POST /oauth/register
+	Authorize Limit `yaml:"authorize"` // POST /oauth/authorize
+	Token     Limit `yaml:"token"`     // POST /oauth/token
+}
+
+// Limit is one endpoint's bucket: sustained PerMinute requests, bursts up to Burst.
+type Limit struct {
+	PerMinute int `yaml:"per_minute"`
+	Burst     int `yaml:"burst"`
+}
+
+// Resolved returns r with every zero value replaced by its default.
+func (r RateLimit) Resolved() RateLimit {
+	fill := func(l *Limit, perMinute, burst int) {
+		if l.PerMinute == 0 {
+			l.PerMinute = perMinute
+		}
+		if l.Burst == 0 {
+			l.Burst = burst
+		}
+	}
+	fill(&r.Register, DefaultRegisterPerMinute, DefaultRegisterBurst)
+	fill(&r.Authorize, DefaultAuthorizePerMinute, DefaultAuthorizeBurst)
+	fill(&r.Token, DefaultTokenPerMinute, DefaultTokenBurst)
+	return r
 }
 
 // Upstream describes one proxied MCP server.
@@ -271,6 +324,10 @@ func (c *Config) applyDefaults() {
 	if c.TLSEnabled() && c.TLS.ReloadInterval == 0 {
 		c.TLS.ReloadInterval = DefaultReloadInterval
 	}
+	if len(c.TrustedProxies) == 0 {
+		c.TrustedProxies = DefaultTrustedProxies()
+	}
+	c.OAuth.RateLimit = c.OAuth.RateLimit.Resolved()
 }
 
 // loadKeys resolves the key source and decodes Secrets.Keys.
@@ -400,6 +457,32 @@ func (c *Config) validate() []error {
 				add("upstreams[%d].path: %q overlaps upstreams[%d].path %q", j, b, i, a)
 			}
 		}
+	}
+
+	for _, l := range []struct {
+		field string
+		v     Limit
+	}{
+		{"register", c.OAuth.RateLimit.Register},
+		{"authorize", c.OAuth.RateLimit.Authorize},
+		{"token", c.OAuth.RateLimit.Token},
+	} {
+		if l.v.PerMinute < 0 {
+			add("oauth.rate_limit.%s.per_minute: must not be negative", l.field)
+		}
+		if l.v.Burst < 0 {
+			add("oauth.rate_limit.%s.burst: must not be negative", l.field)
+		}
+	}
+
+	c.TrustedNets = c.TrustedNets[:0]
+	for i, raw := range c.TrustedProxies {
+		p, err := parseTrusted(raw)
+		if err != nil {
+			add("trusted_proxies[%d]: %v", i, err)
+			continue
+		}
+		c.TrustedNets = append(c.TrustedNets, p)
 	}
 
 	if (c.TLS.CertFile == "") != (c.TLS.KeyFile == "") {
@@ -573,4 +656,30 @@ func validHeaderToken(s string) bool {
 		}
 	}
 	return true
+}
+
+// parseTrusted parses a CIDR or a bare IP (taken as /32 or /128). IPv4-mapped
+// IPv6 notation is rejected: write the IPv4 form instead.
+func parseTrusted(raw string) (netip.Prefix, error) {
+	raw = strings.TrimSpace(raw)
+	var p netip.Prefix
+	if strings.Contains(raw, "/") {
+		var err error
+		if p, err = netip.ParsePrefix(raw); err != nil {
+			return netip.Prefix{}, errors.New("is not a valid CIDR or IP address")
+		}
+	} else {
+		a, err := netip.ParseAddr(raw)
+		if err != nil || a.Zone() != "" {
+			return netip.Prefix{}, errors.New("is not a valid CIDR or IP address")
+		}
+		p = netip.PrefixFrom(a, a.BitLen())
+	}
+	if p.Addr().Is4In6() {
+		return netip.Prefix{}, errors.New("must not use IPv4-mapped IPv6 notation; write the IPv4 form")
+	}
+	if p.Bits() == 0 {
+		return netip.Prefix{}, errors.New("must not match every address (prefix length 0 would make X-Forwarded-For fully spoofable)")
+	}
+	return p.Masked(), nil
 }

@@ -91,7 +91,9 @@ func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (*Server, er
 // probes do not flood the debug access log) and everything else behind httplog.
 func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Handler, error) {
 	inner := http.NewServeMux()
-	oauth.New(cfg, sealer, log).Register(inner)
+	// One resolver for the access log and the rate limiter, so they agree.
+	res := httplog.NewResolver(cfg.TrustedNets)
+	oauth.New(cfg, sealer, log, oauth.WithClientIP(res.ClientIP)).Register(inner)
 	for _, up := range cfg.Upstreams {
 		ph, err := proxy.New(up, cfg.PublicURL, sealer, log)
 		if err != nil {
@@ -102,7 +104,7 @@ func Handler(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (http.Ha
 		inner.Handle(up.Path, ph)
 	}
 
-	logged := httplog.Middleware(log, inner)
+	logged := httplog.Middleware(log, inner, httplog.WithResolver(res))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == PathHealthz && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			healthz(w, r)

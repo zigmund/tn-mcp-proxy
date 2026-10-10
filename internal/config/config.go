@@ -32,6 +32,11 @@ const (
 	DefaultCodeTTL         = 5 * time.Minute
 	DefaultReloadInterval  = time.Minute
 
+	// DefaultValidateTimeout bounds one credential check; MaxValidateTimeout
+	// is the largest accepted validate.timeout.
+	DefaultValidateTimeout = 10 * time.Second
+	MaxValidateTimeout     = 60 * time.Second
+
 	// Default per-IP rate limits of the OAuth endpoints (requests per minute
 	// and burst). They are generous because claude.ai and ChatGPT call register
 	// and token from shared egress addresses.
@@ -80,6 +85,8 @@ func headerForbidden(h string) bool {
 
 var (
 	nameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+	// toolRe is the accepted shape of validate.tool.
+	toolRe = regexp.MustCompile(`^[A-Za-z0-9_./-]{1,128}$`)
 	// pathRe allows only literal segments: no wildcards, ':', or non-ASCII.
 	pathRe = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 	// quotedRe matches backtick-quoted values in yaml errors (may echo secrets).
@@ -186,6 +193,18 @@ type Upstream struct {
 	Path        string       `yaml:"path"`
 	URL         string       `yaml:"url"`
 	Credentials []Credential `yaml:"credentials"`
+	// Validate, when set, makes the authorize form verify the entered
+	// credentials against the upstream before a code is issued.
+	Validate *Validate `yaml:"validate"`
+}
+
+// Validate configures the credential check: one MCP tools/call made with the
+// entered credentials. Tool must be read-only. Timeout bounds the whole check
+// (the MCP handshake included); 0 or unset means DefaultValidateTimeout.
+type Validate struct {
+	Tool      string         `yaml:"tool"`
+	Arguments map[string]any `yaml:"arguments"`
+	Timeout   time.Duration  `yaml:"timeout"`
 }
 
 // Credential is one header the user supplies for an upstream.
@@ -322,6 +341,9 @@ func (c *Config) applyDefaults() {
 			if cr := &u.Credentials[j]; cr.Label == "" {
 				cr.Label = cr.Header
 			}
+		}
+		if u.Validate != nil && u.Validate.Timeout == 0 {
+			u.Validate.Timeout = DefaultValidateTimeout
 		}
 	}
 	if c.TLSEnabled() && c.TLS.ReloadInterval == 0 {
@@ -568,6 +590,30 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 	}
 	if required == 0 {
 		add("credentials: at least one non-optional credential is required")
+	}
+	if u.Validate != nil {
+		for _, err := range u.Validate.validate() {
+			add("validate.%v", err)
+		}
+	}
+	return errs
+}
+
+// validate checks v; errors are prefixed by the caller. Argument values are
+// never echoed (they could be secrets); the tool name is not secret.
+func (v *Validate) validate() []error {
+	var errs []error
+	switch {
+	case v.Tool == "":
+		errs = append(errs, errors.New("tool: required"))
+	case !toolRe.MatchString(v.Tool):
+		errs = append(errs, fmt.Errorf("tool: %q must match %s", v.Tool, toolRe))
+	}
+	if v.Timeout < 0 || v.Timeout > MaxValidateTimeout {
+		errs = append(errs, fmt.Errorf("timeout: must be between 0 and %s", MaxValidateTimeout))
+	}
+	if _, err := json.Marshal(v.Arguments); err != nil {
+		errs = append(errs, errors.New("arguments: must be a JSON-compatible object (string keys, no NaN/Inf)"))
 	}
 	return errs
 }

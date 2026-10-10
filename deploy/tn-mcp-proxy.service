@@ -1,0 +1,59 @@
+[Unit]
+Description=tn-mcp-proxy (OAuth 2.1 facade for the Tradernet MCP)
+Documentation=https://github.com/zigmund/tn-mcp-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/tn-mcp-proxy -config /etc/tn-mcp-proxy/config.yaml
+# SIGHUP is handled by the binary and does not stop it (reserved for TLS cert reload).
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+# SIGTERM triggers a graceful shutdown; give long-lived SSE streams time to end.
+TimeoutStopSec=30s
+
+# Run as a transient unprivileged user; no state is written to disk.
+DynamicUser=yes
+
+# Token encryption keys. The config must NOT contain `token_keys` (the config
+# file is plain, root-owned, world-readable). Instead keep the keys in a
+# root-only file and let systemd hand a private copy to the service:
+#   secrets.token_keys_file: /run/credentials/tn-mcp-proxy.service/keys
+# (the config does not expand environment variables, so $CREDENTIALS_DIRECTORY
+# cannot be used there; use the absolute path above, the name after the colon
+# below is the file name inside the credentials directory).
+# Create the source file with: install -m 0600 -o root -g root /dev/null /etc/tn-mcp-proxy/keys
+LoadCredential=keys:/etc/tn-mcp-proxy/keys
+
+# --- Hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Outbound HTTPS to the upstream and inbound TCP only. Add AF_UNIX only if you
+# need syslog/journald sockets from inside the process (stderr is enough here).
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Go binaries do not need W+X mappings.
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

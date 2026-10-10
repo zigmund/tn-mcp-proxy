@@ -83,13 +83,67 @@ URL path is logged), request or response headers (`Authorization`, `Cookie`,
 ...), request or response bodies, and tokens.
 
 `remote` holds the client IP only, without a port. It is the TCP peer address,
-except when the peer is a loopback address (nginx on the same host): then the
-right-most `X-Forwarded-For` entry is used (the one nginx appended; earlier
-entries are client-controlled), falling back to `X-Real-IP`. Values that are
-not valid IPs are ignored, IPv6 zones are dropped. From a non-loopback peer
-both headers are ignored, so they cannot be spoofed. nginx should set both:
+except when the peer is a loopback address (a reverse proxy on the same host):
+then the right-most `X-Forwarded-For` entry is used, falling back to
+`X-Real-IP`. Earlier entries are client-controlled, so the proxy must
+overwrite the header with the address it saw instead of appending to a
+client-supplied one. Values that are not valid IPs are ignored, IPv6 zones are
+dropped. From a non-loopback peer both headers are ignored, so they cannot be
+spoofed.
+
+## Reverse proxy
+
+The service speaks plain HTTP (built-in TLS is not implemented yet; setting
+`tls.*` is a startup error), so put a TLS-terminating reverse proxy in front.
+Certificates, HTTP->HTTPS redirects and HSTS are your own setup; the nginx
+snippet below shows only what this service needs. The proxy must forward every
+path (`/.well-known/*`, `/oauth/*` and the upstream paths) to the service.
 
 ```nginx
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header X-Real-IP       $remote_addr;
+# http{} context (conf.d/*.conf is already inside it). Rate limit for /oauth/*.
+limit_req_zone $binary_remote_addr zone=tn_oauth:10m rate=30r/m;
+limit_req_status 429;
+
+server {
+    listen 443 ssl;                     # HTTP/2 is optional: `http2 on;` here (nginx >= 1.25.1) or `listen 443 ssl http2;` on older nginx
+    server_name mcp.example.com;
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+
+    client_max_body_size 10m;           # the service rejects bodies over 10 MiB (413)
+
+    # Proxy settings at server level are inherited by both locations below
+    # (proxy_set_header only while a location defines no proxy_set_header of its own).
+    proxy_http_version 1.1;
+    proxy_set_header Connection        "";               # keepalive to the service
+    proxy_set_header Host              $host;
+    # Overwrite, do not append: the service trusts the right-most entry from a
+    # loopback peer, so a client-supplied header must not add one.
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # MCP uses SSE / streamable HTTP: no buffering, long idle streams.
+    proxy_buffering         off;
+    proxy_request_buffering off;
+    proxy_read_timeout      1h;
+    proxy_send_timeout      1h;
+
+    # Optional: /healthz is for local checks, no need to expose it.
+    location = /healthz { return 404; }
+
+    # OAuth endpoints. Abuse can fill the service's bounded in-memory code and
+    # refresh-family caches (it then answers 503 to legitimate users).
+    # Keep the limit generous: claude.ai calls register/token from shared
+    # egress IPs, so all users share one bucket. Behind a CDN or load balancer
+    # restore the real client IP first (ngx_http_realip_module), otherwise
+    # everyone shares a bucket.
+    location /oauth/ {
+        limit_req zone=tn_oauth burst=30 nodelay;
+        proxy_pass http://127.0.0.1:8787;
+    }
+
+    location / {                        # /.well-known/* and MCP upstream paths
+        proxy_pass http://127.0.0.1:8787;
+    }
+}
 ```

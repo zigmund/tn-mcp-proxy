@@ -177,7 +177,6 @@ error whose `id` is null:
 | Duplicate `method` or `params` key in any message, duplicate `arguments` key in a `tools/call`, or a `method` that is not a string | `-32600 Invalid Request` |
 | A message-level key that equals `method` or `params` only under case folding (`METHOD`, `Params`, `paramſ`), or a key inside the `params` of a `tools/call` that equals `arguments` only under case folding (`Arguments`), in single messages and batch elements alike | `-32600 Invalid Request` |
 | Forbidden argument name | `-32602`, `id` as above |
-| `Content-Encoding` other than `identity` (cannot be inspected; without `forbidden_arguments` the header is not forwarded and the body reaches the upstream as is) | `415` |
 | Larger than `limits.max_request_body` | `413` |
 
 The structural keys `method`, `params` and `arguments` are matched exactly
@@ -407,7 +406,7 @@ the start of the record's `msg`; fields in parentheses):
 | `info` | `credentials rejected by upstream`, `authorize refused: credentials not in allowed_values`, `token credentials not in allowed_values` (`upstream`; `step`, `reason` for the first) | Refused logins and tokens |
 | `warn` | `credential check unavailable` (`upstream`, `step`, `reason`, `err`) | Authorize-time check without a verdict (fail closed) |
 | `warn` | `credential recheck unavailable`, `upstream rejected credentials`, `upstream rejected credentials (tool error, confirmed by re-check)` | Proxy-side re-check and upstream 401 |
-| `info` | `tool call with forbidden argument rejected` (`argument`), `request body refused: not inspectable` (`reason`), `compressed request body refused: ...` | `forbidden_arguments` refusals |
+| `info` | `tool call with forbidden argument rejected` (`argument`), `request body refused: not inspectable` (`reason`) | `forbidden_arguments` refusals |
 | `warn` | `refresh token reuse detected; family revoked` (`client_id`, `family`: 8 hex characters of a SHA-256) | Refresh token replay |
 | `warn` | `global authorize ceiling reached; delaying new logins`, `proxy rate limit refused requests`, `proxy concurrency limit refused requests`, `refresh family cache full, ...` (counts, at most once a minute) | Limits hit |
 | `warn` | `oauth.rate_limit.authorize_global allows more live codes than half the code cache; ...` | Oversized configured ceiling, at startup |
@@ -580,12 +579,15 @@ This differs from `oauth.rate_limit`, which only has the all-or-nothing
   family id; adding one would change the token format.)
 - **Order.** Method and path checks, then the per-IP bucket (so unauthenticated
   floods are cut before any decryption), then authentication, the body size
-  check, the per-grant bucket, per-grant concurrency and the global in-flight
-  cap. A request refused at any step gives back the tokens and slots taken by
-  the earlier ones, so a denial costs nothing at the other tiers and never
-  holds a slot. A `413` for a declared `Content-Length` over the cap also gives
-  the IP token back. The IP token of a request that fails authentication stays
-  spent, as does that of a chunked body that turns out too large mid-stream.
+  check, the content-encoding check, the per-grant bucket, per-grant
+  concurrency and the global in-flight cap. A request refused at any step gives
+  back the tokens and slots taken by the earlier ones, so a denial costs
+  nothing at the other tiers and never holds a slot. A `413` for a declared
+  `Content-Length` over the cap, or a `415` for a `Content-Encoding` other than
+  `identity` (refused for every upstream, since the header is never forwarded),
+  also gives the IP token back. The IP token of a request that fails
+  authentication stays spent, as does that of a chunked body that turns out too
+  large mid-stream.
 - **Responses.** Per-IP, per-grant and per-grant concurrency excess: `429` with
   `Retry-After` (the time until a token is available; `1` for concurrency).
   Global cap: `503` with `Retry-After: 1`. The body is a plain text line, as for

@@ -26,19 +26,11 @@ import (
 // are matched exactly, as strict parsers do, and a key that only equals one
 // under case folding (METHOD, Params, argumentſ) is refused with -32600 too.
 //
-// A compressed body cannot be inspected and is refused with 415.
+// A compressed body cannot be inspected; the handler refuses any non-identity
+// Content-Encoding with 415 before this runs.
 func (h *handler) inspectToolArguments(w http.ResponseWriter, r *http.Request, maxBody int64) bool {
 	if len(h.up.ForbiddenArguments) == 0 || r.Method != http.MethodPost {
 		return true
-	}
-	// Defence in depth: the forwarded headers do not include Content-Encoding,
-	// but a body is never judged unless it is read as sent.
-	for _, v := range r.Header.Values("Content-Encoding") {
-		if enc := strings.TrimSpace(v); enc != "" && !strings.EqualFold(enc, "identity") {
-			h.log.Info("compressed request body refused: cannot inspect for forbidden arguments")
-			http.Error(w, "content-encoding not supported", http.StatusUnsupportedMediaType)
-			return false
-		}
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {

@@ -210,6 +210,12 @@ func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID s
 	if !s.checkResource(w, form, up) {
 		return
 	}
+	// Before the single-use claim: a code minted under another allow-list must
+	// not be redeemed into tokens that the proxy would refuse anyway.
+	if !up.CredsAllowed(code.Creds) {
+		grant("credentials not in allowed_values")
+		return
+	}
 
 	switch err := s.codes.claim(code.JTI, time.Unix(code.Exp, 0), s.now()); {
 	case err == nil:
@@ -268,6 +274,10 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		return
 	}
 	if !s.checkResource(w, form, up) {
+		return
+	}
+	if !up.CredsAllowed(rt.Creds) {
+		grant("credentials not in allowed_values")
 		return
 	}
 	now := s.now()

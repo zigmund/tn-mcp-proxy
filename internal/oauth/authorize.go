@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	maxAuthorizeBody = 32 << 10 // POST form size cap
-	maxStateLen      = 1024     // bytes; state is echoed verbatim
-	maxCredLen       = 4096     // bytes per credential value
-	pkceChallengeLen = 43       // base64url(SHA-256), unpadded
+	maxAuthorizeBody = 32 << 10                     // POST form size cap
+	maxStateLen      = 1024                         // bytes; state is echoed verbatim
+	maxCredLen       = config.MaxCredentialValueLen // bytes per credential value
+	pkceChallengeLen = 43                           // base64url(SHA-256), unpadded
 	// formTTL bounds how long a rendered form may sit before it is submitted.
 	// It is independent of oauth.code_ttl, which only starts at submission.
 	formTTL = 15 * time.Minute
@@ -267,6 +267,14 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return nil
 	}
 
+	// Allow-list: the same generic message as a rejected credential, so the
+	// form does not reveal that one exists. No upstream call for foreign keys.
+	if !up.CredsAllowed(creds) {
+		s.log.Info("authorize refused: credentials not in allowed_values", "upstream", up.Name)
+		s.writeForm(w, http.StatusBadRequest, c, up, req, sealed, values, s.rejectedMsg(up))
+		return nil
+	}
+
 	if msg, status := s.validateCreds(r.Context(), up, creds); msg != "" {
 		if status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", retryAfterUnavailable)
@@ -316,14 +324,23 @@ func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds ma
 		return "", 0
 	}
 	logCheck(s.log, up.Name, err)
-	title := up.Title
-	if title == "" {
-		title = up.Name
-	}
+	title := upstreamTitle(up)
 	if errors.Is(err, credcheck.ErrRejected) {
-		return title + " rejected these credentials. Check them and try again.", http.StatusBadRequest
+		return s.rejectedMsg(up), http.StatusBadRequest
 	}
 	return "Could not verify the credentials with " + title + " right now. Try again later.", http.StatusServiceUnavailable
+}
+
+func upstreamTitle(up config.Upstream) string {
+	if up.Title == "" {
+		return up.Name
+	}
+	return up.Title
+}
+
+// rejectedMsg is the form error for credentials that must not get a token.
+func (s *Server) rejectedMsg(up config.Upstream) string {
+	return upstreamTitle(up) + " rejected these credentials. Check them and try again."
 }
 
 // lookupClient opens a client_id, mapping failures to page failures.

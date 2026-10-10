@@ -3,6 +3,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -18,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -237,11 +241,55 @@ type Validate struct {
 }
 
 // Credential is one header the user supplies for an upstream.
+//
+// AllowedValues, when non-empty, restricts the credential to those exact
+// values (compared after trimming surrounding whitespace, like the authorize
+// form does). It is allowed only on non-secret credentials, so no secret ends
+// up in the config file.
 type Credential struct {
-	Header   string `yaml:"header"`
-	Label    string `yaml:"label"`
-	Secret   bool   `yaml:"secret"`
-	Optional bool   `yaml:"optional"`
+	Header        string   `yaml:"header"`
+	Label         string   `yaml:"label"`
+	Secret        bool     `yaml:"secret"`
+	Optional      bool     `yaml:"optional"`
+	AllowedValues []string `yaml:"allowed_values"`
+}
+
+// MaxCredentialValueLen is the longest credential value (bytes) the authorize
+// form accepts; allowed_values entries are held to the same cap.
+const MaxCredentialValueLen = 4096
+
+// HasAllowList reports whether any credential of u restricts its values.
+func (u Upstream) HasAllowList() bool {
+	for _, cr := range u.Credentials {
+		if len(cr.AllowedValues) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// CredsAllowed reports whether creds (canonical header name -> value, as stored
+// in token payloads) satisfy every allowed_values list of u. With no lists it is
+// always true. A credential that has a list must be present and match one entry
+// exactly. Comparison is constant-time per candidate and does not stop at the
+// first match, so timing reveals nothing about the configured values.
+func (u Upstream) CredsAllowed(creds map[string]string) bool {
+	ok := true
+	for _, cr := range u.Credentials {
+		if len(cr.AllowedValues) == 0 {
+			continue
+		}
+		got := sha256.Sum256([]byte(strings.TrimSpace(creds[http.CanonicalHeaderKey(cr.Header)])))
+		match := 0
+		for _, want := range cr.AllowedValues {
+			w := sha256.Sum256([]byte(strings.TrimSpace(want)))
+			match |= subtle.ConstantTimeCompare(got[:], w[:])
+		}
+		if match != 1 {
+			ok = false
+		}
+	}
+	return ok
 }
 
 // TLS configures optional built-in TLS termination. Relative file paths are
@@ -693,6 +741,9 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 			add("credentials[%d].header: %q duplicates credentials[%d]", j, cr.Header, k)
 		}
 		seen[key] = j
+		for _, err := range cr.validateAllowed() {
+			add("credentials[%d].%v", j, err)
+		}
 	}
 	if required == 0 {
 		add("credentials: at least one non-optional credential is required")
@@ -700,6 +751,36 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 	if u.Validate != nil {
 		for _, err := range u.Validate.validate() {
 			add("validate.%v", err)
+		}
+	}
+	return errs
+}
+
+// validateAllowed checks AllowedValues. Errors name entries by index and never
+// echo a value.
+func (cr Credential) validateAllowed() []error {
+	if len(cr.AllowedValues) == 0 {
+		return nil
+	}
+	var errs []error
+	if cr.Secret {
+		errs = append(errs, errors.New("allowed_values: not allowed on a secret credential (set secret: false; the values are stored in the config)"))
+	}
+	seen := map[string]int{}
+	for k, v := range cr.AllowedValues {
+		t := strings.TrimSpace(v)
+		switch {
+		case !utf8.ValidString(v) || strings.IndexFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0:
+			errs = append(errs, fmt.Errorf("allowed_values[%d]: contains control characters or invalid UTF-8", k))
+		case t == "":
+			errs = append(errs, fmt.Errorf("allowed_values[%d]: must not be empty", k))
+		case len(t) > MaxCredentialValueLen:
+			errs = append(errs, fmt.Errorf("allowed_values[%d]: longer than %d bytes", k, MaxCredentialValueLen))
+		default:
+			if j, dup := seen[t]; dup {
+				errs = append(errs, fmt.Errorf("allowed_values[%d]: duplicates allowed_values[%d]", k, j))
+			}
+			seen[t] = k
 		}
 	}
 	return errs

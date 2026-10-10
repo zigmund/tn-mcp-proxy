@@ -66,6 +66,13 @@ upstreams:
     url: https://tradernet.com/mcp/tn
     credentials:                   # headers the user types into the form
       - { header: X-TN-API-Key,    label: API key }
+      # Optional allow-list (non-secret credentials only): only these values get
+      # a token, existing tokens with other values stop working, and the upstream
+      # is not contacted for anything else. Without it anyone with valid
+      # credentials can use this server (a startup warning says so).
+      # (this line replaces the X-TN-API-Key entry above; do not enable both,
+      # a duplicate header is a config error)
+      # - { header: X-TN-API-Key, label: API key, allowed_values: ["REPLACE_WITH_YOUR_API_KEY"] }
       - { header: X-TN-API-Secret, label: API secret, secret: true }
       - { header: X-TN-SID,        label: SID, optional: true }
     # Verify the entered credentials with one authenticated MCP call before a

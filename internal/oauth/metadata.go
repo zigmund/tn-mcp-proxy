@@ -49,14 +49,17 @@ func (d metadataDoc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(d.body)
 }
 
-// preflight answers CORS preflight requests for browser-based MCP clients.
-func preflight(w http.ResponseWriter, _ *http.Request) {
-	h := w.Header()
-	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-	h.Set("Access-Control-Allow-Headers", "MCP-Protocol-Version, Content-Type, Authorization")
-	h.Set("Access-Control-Max-Age", "86400")
-	w.WriteHeader(http.StatusNoContent)
+// preflight returns a handler answering CORS preflight requests for
+// browser-based MCP clients; methods is the Allow-Methods value.
+func preflight(methods string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Allow-Methods", methods)
+		h.Set("Access-Control-Allow-Headers", "MCP-Protocol-Version, Content-Type, Authorization")
+		h.Set("Access-Control-Max-Age", "86400")
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func buildMetadata(cfg *config.Config) []metadataDoc {

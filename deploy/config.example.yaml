@@ -74,6 +74,22 @@ oauth:
 # Setting it replaces the default, so keep loopback if nginx runs locally.
 # trusted_proxies: ["127.0.0.0/8", "::1/128", "192.0.2.0/24"]
 
+# Opt-in audit log: info-level records (msg "audit", event authorize / token /
+# request) with the client IP and the values of credentials marked "audit: true"
+# on the upstream below, so you can answer "who used account X through this IP,
+# and when". Recommended for a server that is open to anyone's keys. Secret
+# values, tokens, bodies and query strings are never written; "audit: true" is
+# an error together with "secret: true". "retention" is required, at most 64
+# printable characters, and states your retention of these logs; the proxy
+# does NOT enforce it, your log rotation does. Logs of other people's IPs and
+# keys are personal data in many jurisdictions: you decide retention and server
+# location. Needs log.level debug or info. See docs/configuration.md#audit-log
+# audit:
+#   enabled: true
+#   retention: "12 months"
+# With it, also set "audit: true" on the identifying credential below:
+#   - { header: X-TN-API-Key, label: API key, audit: true }
+
 upstreams:
   - name: tn                       # [a-z0-9-]+, unique
     title: Tradernet               # shown on the authorize form (default: name)

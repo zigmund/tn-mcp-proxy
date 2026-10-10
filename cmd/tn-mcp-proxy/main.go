@@ -123,6 +123,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer, h hoo
 		"public_url", cfg.PublicURL,
 		"upstreams", ups,
 		"tls", certs != nil,
+		"audit", cfg.Audit.Enabled,
 	)
 	if cfg.AllowInsecureHTTP {
 		log.Warn("allow_insecure_http is set: plain http is accepted for public_url, oauth.allowed_redirect_uris and upstreams[].url; use it only on trusted networks")

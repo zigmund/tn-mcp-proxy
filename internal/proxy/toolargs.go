@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -28,36 +29,85 @@ import (
 //
 // A compressed body cannot be inspected; the handler refuses any non-identity
 // Content-Encoding with 415 before this runs.
-func (h *handler) inspectToolArguments(w http.ResponseWriter, r *http.Request, maxBody int64) bool {
+//
+// The JSON-RPC methods and tool names found on the way are returned for the
+// audit log (nil when the inspection is off: the body is then not parsed at
+// all, only to be logged).
+func (h *handler) inspectToolArguments(w http.ResponseWriter, r *http.Request, maxBody int64, creds map[string]string) (*bodyInfo, bool) {
 	if len(h.up.ForbiddenArguments) == 0 || r.Method != http.MethodPost {
-		return true
+		return nil, true
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return false
+			return nil, false
 		}
 		h.log.Debug("reading request body", "err", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
-		return false
+		return nil, false
 	}
-	if rej := checkToolArguments(body, h.up.ForbiddenArguments); rej != nil {
+	info, rej := checkToolArguments(body, h.up.ForbiddenArguments)
+	if rej != nil {
+		who := h.who(r, creds)
 		if rej.argument != "" {
-			h.log.Info("tool call with forbidden argument rejected", "argument", rej.argument)
+			h.log.Info("tool call with forbidden argument rejected", append([]any{"argument", rej.argument}, who...)...)
 		} else {
-			h.log.Info("request body refused: not inspectable", "reason", rej.message)
+			h.log.Info("request body refused: not inspectable", append([]any{"reason", rej.message}, who...)...)
 		}
 		rej.write(w)
-		return false
+		return nil, false
 	}
 	// Forward the same bytes with an exact Content-Length (a chunked client
 	// body becomes a fixed-length one; the content is unchanged).
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.TransferEncoding = nil
-	return true
+	return &info, true
+}
+
+// Bounds on what the audit log takes from a request body.
+const (
+	maxAuditCalls   = 8   // batch entries listed
+	maxAuditNameLen = 128 // bytes of a method or tool name
+)
+
+// rpcCall is the JSON-RPC method and, for tools/call, the tool name of one
+// message. Both are clipped, user-controlled strings.
+type rpcCall struct{ method, tool string }
+
+// bodyInfo is what the inspection learned about a request body for the audit
+// log. batch is the number of messages of a JSON array (0 for a single
+// message); calls holds at most maxAuditCalls of them.
+type bodyInfo struct {
+	calls []rpcCall
+	batch int
+}
+
+// clip replaces control and format runes (bidi overrides such as U+202E
+// included) and invalid UTF-8 with U+FFFD, so a logged name cannot disguise
+// itself, then cuts the result to at most n bytes without splitting a UTF-8
+// sequence. The input is pre-cut to n bytes so mapping stays bounded.
+func clip(s string, n int) string {
+	s = cutRunes(s, n)
+	return cutRunes(strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || !unicode.IsPrint(r) {
+			return utf8.RuneError
+		}
+		return r
+	}, s), n)
+}
+
+// cutRunes cuts s to at most n bytes on a UTF-8 sequence boundary.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // JSON-RPC error codes used in rejections.
@@ -93,42 +143,48 @@ var (
 
 // checkToolArguments returns nil when body may be forwarded, else the
 // rejection to answer with.
-func checkToolArguments(body []byte, forbidden []string) *rejection {
+func checkToolArguments(body []byte, forbidden []string) (bodyInfo, *rejection) {
 	// Only the four JSON whitespace bytes are trimmed: a byte order mark or
 	// another Unicode space is not JSON and must not be skipped.
 	body = bytes.Trim(body, " \t\r\n")
 	if len(body) == 0 || !utf8.Valid(body) || !json.Valid(body) {
-		return errParse
+		return bodyInfo{}, errParse
 	}
 	switch body[0] {
 	case '{':
-		return checkMessage(body, forbidden, true)
+		var c rpcCall
+		rej := checkMessage(body, forbidden, true, &c)
+		return bodyInfo{calls: []rpcCall{c}}, rej
 	case '[':
 		// One decoder walks the array; every element must be an object even
 		// after an earlier one was rejected, so a malformed batch is a parse
 		// error rather than a partial verdict.
 		dec := json.NewDecoder(bytes.NewReader(body))
 		if tok, err := dec.Token(); err != nil || tok != json.Delim('[') {
-			return errParse
+			return bodyInfo{}, errParse
 		}
 		var first *rejection
-		n := 0
+		var info bodyInfo
 		for dec.More() {
 			var el json.RawMessage
 			if err := dec.Decode(&el); err != nil || len(el) == 0 || el[0] != '{' {
-				return errParse
+				return bodyInfo{}, errParse
 			}
-			n++
+			info.batch++
 			if first == nil {
-				first = checkMessage(el, forbidden, false)
+				var c rpcCall
+				first = checkMessage(el, forbidden, false, &c)
+				if len(info.calls) < maxAuditCalls {
+					info.calls = append(info.calls, c)
+				}
 			}
 		}
-		if n == 0 {
-			return errParse
+		if info.batch == 0 {
+			return bodyInfo{}, errParse
 		}
-		return first
+		return info, first
 	}
-	return errParse
+	return bodyInfo{}, errParse
 }
 
 // isKeyVariant reports whether k is not exactly one of the structural names
@@ -170,8 +226,9 @@ func eachMember(raw []byte, fn func(key string, val json.RawMessage)) error {
 }
 
 // checkMessage inspects one JSON-RPC message object. single reports whether
-// it is the whole request, in which case its id is echoed in a rejection.
-func checkMessage(raw []byte, forbidden []string, single bool) *rejection {
+// it is the whole request, in which case its id is echoed in a rejection. The
+// method (and tool name) found are stored in call, clipped.
+func checkMessage(raw []byte, forbidden []string, single bool, call *rpcCall) *rejection {
 	var method, params, id json.RawMessage
 	var dup bool
 	err := eachMember(raw, func(k string, v json.RawMessage) {
@@ -200,6 +257,7 @@ func checkMessage(raw []byte, forbidden []string, single bool) *rejection {
 	if method[0] != '"' || json.Unmarshal(method, &m) != nil {
 		return errInvalid
 	}
+	call.method = clip(m, maxAuditNameLen)
 	if m != "tools/call" || params == nil || params[0] != '{' {
 		return nil
 	}
@@ -207,10 +265,17 @@ func checkMessage(raw []byte, forbidden []string, single bool) *rejection {
 	var args json.RawMessage
 	dup = false
 	if err := eachMember(params, func(k string, v json.RawMessage) {
-		dup = dup || isKeyVariant(k, "arguments")
-		if k == "arguments" {
+		dup = dup || isKeyVariant(k, "arguments", "name")
+		switch k {
+		case "arguments":
 			dup = dup || args != nil
 			args = v
+		case "name":
+			call.tool = "" // a later non-string name must not leave a stale one
+			var n string
+			if len(v) > 0 && v[0] == '"' && json.Unmarshal(v, &n) == nil {
+				call.tool = clip(n, maxAuditNameLen)
+			}
 		}
 	}); err != nil {
 		return errParse

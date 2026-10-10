@@ -117,6 +117,7 @@ type Config struct {
 	Secrets   Secrets     `yaml:"secrets"`
 	OAuth     OAuth       `yaml:"oauth"`
 	Limits    ProxyLimits `yaml:"limits"`
+	Audit     Audit       `yaml:"audit"`
 	Upstreams []Upstream  `yaml:"upstreams"`
 	TLS       TLS         `yaml:"tls"`
 
@@ -136,6 +137,34 @@ type Config struct {
 type Log struct {
 	Level  string `yaml:"level"`  // debug|info|warn|error
 	Format string `yaml:"format"` // json|text
+}
+
+// Audit configures the opt-in audit log: info-level records ("audit" with an
+// event field) that tie a client IP to the credentials marked audit: true, so
+// an operator can answer "who used account X through this server, and when".
+// The proxy never enforces Retention: it is the retention the operator states
+// for the log files, which log rotation applies.
+type Audit struct {
+	Enabled bool `yaml:"enabled"`
+	// Retention is short free text such as "12 months". Required when Enabled.
+	Retention string `yaml:"retention"`
+}
+
+// MaxAuditRetentionLen is the longest audit.retention, in characters.
+const MaxAuditRetentionLen = 64
+
+// validate checks a. Errors are prefixed with the field name.
+func (a Audit) validate() []error {
+	var errs []error
+	switch {
+	case a.Retention == "" && a.Enabled:
+		errs = append(errs, errors.New("audit.retention: required when audit.enabled is true"))
+	case utf8.RuneCountInString(a.Retention) > MaxAuditRetentionLen:
+		errs = append(errs, fmt.Errorf("audit.retention: longer than %d characters", MaxAuditRetentionLen))
+	case strings.IndexFunc(a.Retention, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 || !utf8.ValidString(a.Retention):
+		errs = append(errs, errors.New("audit.retention: must be printable text without control characters"))
+	}
+	return errs
 }
 
 // Secrets holds token encryption keys. Exactly one of TokenKeys and
@@ -263,10 +292,14 @@ type Validate struct {
 // values (compared after trimming surrounding whitespace, like the authorize
 // form does). It is allowed only on non-secret credentials, so no secret ends
 // up in the config file.
+//
+// Audit makes the audit log (see Audit) record the value, so it is not allowed
+// together with Secret. A credential with neither flag is never logged.
 type Credential struct {
 	Header        string   `yaml:"header"`
 	Label         string   `yaml:"label"`
 	Secret        bool     `yaml:"secret"`
+	Audit         bool     `yaml:"audit"`
 	Optional      bool     `yaml:"optional"`
 	AllowedValues []string `yaml:"allowed_values"`
 }
@@ -274,6 +307,31 @@ type Credential struct {
 // MaxCredentialValueLen is the longest credential value (bytes) the authorize
 // form accepts; allowed_values entries are held to the same cap.
 const MaxCredentialValueLen = 4096
+
+// AuditedCredentials returns the credentials whose values the audit log records.
+func (u Upstream) AuditedCredentials() []Credential {
+	var out []Credential
+	for _, cr := range u.Credentials {
+		if cr.Audit && !cr.Secret {
+			out = append(out, cr)
+		}
+	}
+	return out
+}
+
+// AuditedLabels returns the labels (the header name when a credential has no
+// label) of the audited credentials, in config order, for the authorize page.
+func (u Upstream) AuditedLabels() []string {
+	var out []string
+	for _, cr := range u.AuditedCredentials() {
+		if cr.Label != "" {
+			out = append(out, cr.Label)
+		} else {
+			out = append(out, cr.Header)
+		}
+	}
+	return out
+}
 
 // HasAllowList reports whether any credential of u restricts its values.
 func (u Upstream) HasAllowList() bool {
@@ -410,6 +468,7 @@ func (c *Config) applyDefaults() {
 	if c.Log.Level == "" {
 		c.Log.Level = DefaultLogLevel
 	}
+	c.Audit.Retention = strings.TrimSpace(c.Audit.Retention)
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	if c.Log.Format == "" {
 		c.Log.Format = DefaultLogFormat
@@ -591,6 +650,11 @@ func (c *Config) validate() []error {
 		add("log.format: %q must be one of json|text", c.Log.Format)
 	}
 
+	errs = append(errs, c.Audit.validate()...)
+	if c.Audit.Enabled && (c.Log.Level == "warn" || c.Log.Level == "error") {
+		add("audit.enabled: needs log.level debug or info, audit records are written at info level")
+	}
+
 	for _, d := range []struct {
 		field string
 		v     time.Duration
@@ -743,6 +807,9 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 	for j, cr := range u.Credentials {
 		if !cr.Optional {
 			required++
+		}
+		if cr.Audit && cr.Secret {
+			add("credentials[%d].audit: not allowed together with secret (a secret is never logged)", j)
 		}
 		switch {
 		case cr.Header == "":

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/zigmund/tn-mcp-proxy/internal/audit"
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/credcheck"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
@@ -270,12 +272,13 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	// Allow-list: the same generic message as a rejected credential, so the
 	// form does not reveal that one exists. No upstream call for foreign keys.
 	if !up.CredsAllowed(creds) {
-		s.log.Info("authorize refused: credentials not in allowed_values", "upstream", up.Name)
+		s.log.Info("authorize refused: credentials not in allowed_values",
+			append([]any{"upstream", up.Name}, s.audit.Who(s.clientIP(r), up, creds)...)...)
 		s.writeForm(w, http.StatusBadRequest, c, up, req, sealed, values, s.rejectedMsg(up))
 		return nil
 	}
 
-	if msg, status := s.validateCreds(r.Context(), up, creds); msg != "" {
+	if msg, status := s.validateCreds(r.Context(), up, creds, s.audit.Who(s.clientIP(r), up, creds)); msg != "" {
 		if status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", retryAfterUnavailable)
 		}
@@ -315,14 +318,31 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return redirectFailure(req.RedirectURI, req.State, codeServerError, "internal error")
 	}
 	s.log.Debug("authorization code issued", "upstream", up.Name, "client_name", c.Name)
+	s.audit.Record(r.Context(), audit.EventAuthorize,
+		slog.String("client_ip", s.clientIP(r)),
+		slog.String("upstream", up.Name),
+		slog.String("client_id", shortID(req.ClientID)),
+		slog.String("redirect_host", redirectHost(req.RedirectURI)),
+		s.audit.Creds(up, creds),
+	)
 	s.redirect(w, r, req.RedirectURI, req.State, url.Values{"code": {code}})
 	return nil
+}
+
+// redirectHost returns the host (with port, if any) of a redirect URI.
+func redirectHost(uri string) string {
+	if u, err := url.Parse(uri); err == nil {
+		return u.Host
+	}
+	return ""
 }
 
 // validateCreds runs the upstream's credential check, if configured. A
 // non-empty msg means no code may be issued: the form is re-rendered with that
 // message and status (400 rejected, 503 no verdict, so the check fails closed).
-func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds map[string]string) (msg string, status int) {
+// who is the audit identification (client IP and audited values) for the
+// refusal log line; nil when audit is off.
+func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds map[string]string, who []any) (msg string, status int) {
 	if up.Validate == nil {
 		return "", 0
 	}
@@ -330,7 +350,7 @@ func (s *Server) validateCreds(ctx context.Context, up config.Upstream, creds ma
 	if err == nil {
 		return "", 0
 	}
-	logCheck(s.log, up.Name, err)
+	logCheck(s.log, up.Name, err, who...)
 	title := upstreamTitle(up)
 	if errors.Is(err, credcheck.ErrRejected) {
 		return s.rejectedMsg(up), http.StatusBadRequest

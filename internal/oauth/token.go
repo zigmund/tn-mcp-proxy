@@ -7,12 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/zigmund/tn-mcp-proxy/internal/audit"
 	"github.com/zigmund/tn-mcp-proxy/internal/config"
 	"github.com/zigmund/tn-mcp-proxy/internal/seal"
 	"github.com/zigmund/tn-mcp-proxy/internal/tokens"
@@ -121,9 +123,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	switch form.Get("grant_type") {
 	case grantAuthorizationCode:
-		s.exchangeCode(w, form, clientID, c)
+		s.exchangeCode(w, r, form, clientID, c)
 	case grantRefreshToken:
-		s.refresh(w, form, clientID)
+		s.refresh(w, r, form, clientID)
 	case "":
 		s.tokenError(w, http.StatusBadRequest, codeInvalidRequest, "grant_type is required")
 	default:
@@ -154,7 +156,7 @@ func (s *Server) clientAuthFailed(w http.ResponseWriter, err error) {
 // exchangeCode redeems an authorization code. Single-use is claimed only
 // after every other check passed, so a request that fails validation (for
 // example a wrong verifier) does not burn the code of the legitimate client.
-func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID string, c client) {
+func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, form url.Values, clientID string, c client) {
 	rawCode, redirectURI, verifier := form.Get("code"), form.Get("redirect_uri"), form.Get("code_verifier")
 	switch {
 	case rawCode == "":
@@ -235,7 +237,9 @@ func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID s
 		return
 	}
 	now := s.now()
-	s.issueAt(w, now, up.Name, clientID, code.Creds, fam, 0, now.Unix())
+	if s.issueAt(w, now, up.Name, clientID, code.Creds, fam, 0, now.Unix()) {
+		s.auditToken(r, grantAuthorizationCode, up, clientID, fam, code.Creds)
+	}
 }
 
 // refresh redeems a refresh token. Refresh tokens are rotated (every success
@@ -245,7 +249,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID s
 // new pair is sealed, so a sealing failure, or a client that loses the
 // response, leaves a spent token and requires re-authorization; the
 // alternative (claim after issue) would let concurrent requests both succeed.
-func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string) {
+func (s *Server) refresh(w http.ResponseWriter, r *http.Request, form url.Values, clientID string) {
 	raw := form.Get("refresh_token")
 	if raw == "" {
 		s.tokenError(w, http.StatusBadRequest, codeInvalidRequest, "refresh_token is required")
@@ -328,7 +332,9 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 			// Short non-reversible digests only: for public clients the client_id
 			// is the sole client authenticator, and the family id is the key
 			// of the reuse-detection state.
-			s.log.Warn("refresh token reuse detected; family revoked", "client_id", shortID(clientID), "family", shortID(rt.Family))
+			s.log.Warn("refresh token reuse detected; family revoked", append([]any{
+				"upstream", up.Name, "client_id", shortID(clientID), "family", shortID(rt.Family),
+			}, s.audit.Who(s.clientIP(r), up, rt.Creds)...)...)
 		}
 		grant("family revoked")
 		return
@@ -344,7 +350,9 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		s.cacheFull(w, "refresh token", &s.families.full)
 		return
 	}
-	s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1, start)
+	if s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1, start) {
+		s.auditToken(r, grantRefreshToken, up, clientID, rt.Family, rt.Creds)
+	}
 }
 
 // cacheFull answers a token request that cannot be tracked because a cache
@@ -394,12 +402,26 @@ func (s *Server) checkResource(w http.ResponseWriter, form url.Values, up config
 	return false
 }
 
+// auditToken writes the audit record of an issued token pair. Digests only:
+// the client_id and family id are never written raw.
+func (s *Server) auditToken(r *http.Request, grant string, up config.Upstream, clientID, family string, creds map[string]string) {
+	s.audit.Record(r.Context(), audit.EventToken,
+		slog.String("grant_type", grant),
+		slog.String("client_ip", s.clientIP(r)),
+		slog.String("upstream", up.Name),
+		slog.String("client_id", shortID(clientID)),
+		slog.String("family", shortID(family)),
+		s.audit.Creds(up, creds),
+	)
+}
+
 // issueAt seals a fresh access and refresh token pair and writes the
 // response. It takes an explicit clock reading, so the refresh token's expiry
 // equals the one already recorded in the family cache. start is the unix time
 // of the login (see tokens.Refresh); both expiries are capped at start plus
-// oauth.max_session_ttl, and the caller guarantees now is before that.
-func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientID string, creds map[string]string, fam string, gen, start int64) {
+// oauth.max_session_ttl, and the caller guarantees now is before that. It
+// reports whether the tokens were issued.
+func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientID string, creds map[string]string, fam string, gen, start int64) bool {
 	accessTTL, refreshTTL := s.cfg.OAuth.AccessTokenTTL, s.refreshTTL()
 	if accessTTL <= 0 {
 		accessTTL = config.DefaultAccessTokenTTL
@@ -417,7 +439,7 @@ func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientI
 		// Never log the payload: it carries credentials.
 		s.log.Error("sealing tokens", "err", err)
 		s.tokenError(w, http.StatusInternalServerError, codeServerError, "internal error")
-		return
+		return false
 	}
 	s.log.Debug("tokens issued", "upstream", upstream)
 	s.writeTokenJSON(w, http.StatusOK, tokenResponse{
@@ -428,6 +450,7 @@ func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientI
 		ExpiresIn:    accessExp.Unix() - now.Unix(),
 		RefreshToken: refresh,
 	})
+	return true
 }
 
 // cappedExp returns now+ttl, but never later than the end of the session that

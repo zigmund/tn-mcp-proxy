@@ -288,6 +288,10 @@ reports of the independent security audits are indexed in
   Without a list, anyone with valid upstream credentials can use the server (and
   its IP) and the proxy logs a startup warning. See
   [docs/configuration.md](docs/configuration.md#restricting-access).
+- Running open to anyone's keys? Enable the opt-in audit log (`audit.enabled`,
+  with `audit: true` on the identifying credential) so you can answer "who used
+  account X through this IP, and when". See
+  [docs/configuration.md](docs/configuration.md#audit-log).
 - Run a single instance. Single-use authorization codes and refresh-token
   families are tracked in bounded in-memory caches, so several instances would
   not see each other's usage.

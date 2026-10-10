@@ -11,8 +11,8 @@ Error messages never echo URL or key material.
 |---|---|---|
 | `listen` | `127.0.0.1:8787` | `host:port`, port 0..65535 |
 | `public_url` | required | Absolute http(s) origin: no path (the proxy owns the host-root `/.well-known/*` and `/oauth/*` paths), userinfo, query or fragment. Normalized: lowercase scheme/host, default port (80/443) dropped, trailing slash stripped |
-| `log.level` | `info` | `debug`, `info`, `warn`, `error` (`debug` enables the access log) |
-| `log.format` | `json` | `json`, `text` |
+| `log.level` | `info` | `debug`, `info`, `warn`, `error` (case-insensitive; other values are rejected; `debug` enables the access log) |
+| `log.format` | `json` | `json`, `text` (case-insensitive; other values are rejected) |
 | `secrets.token_keys` | | Base64 (standard) of 32 bytes each; first key encrypts, others only decrypt |
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
 | `oauth.access_token_ttl` | `1h` | Positive duration |
@@ -63,3 +63,33 @@ openssl rand -base64 32
 Rotation: prepend a new key to `token_keys` (or the keys file) so it becomes the
 encrypting key, keep the old key for decryption, and drop the old key once
 `oauth.refresh_token_ttl` has passed, when no token sealed with it remains valid.
+
+## Logging
+
+The service logs through `log/slog`; `log.level` is the threshold and
+`log.format` selects JSON or text records. The service writes its log output
+to stderr.
+
+At `debug` an access log is enabled: one `http request` record per request,
+written when the request finishes (a long-lived SSE stream is therefore logged
+only once it closes). Fields: `method`, `path`, `status`, `bytes` (response
+body size), `duration`, `remote`, `user_agent` and `proto`. A handler panic is
+logged with `panic=true` (or `aborted=true` for an aborted response) and then
+propagates as usual. At any other level the middleware does nothing beyond
+calling the handler.
+
+Never recorded: the query string (OAuth codes and state travel there; only the
+URL path is logged), request or response headers (`Authorization`, `Cookie`,
+...), request or response bodies, and tokens.
+
+`remote` holds the client IP only, without a port. It is the TCP peer address,
+except when the peer is a loopback address (nginx on the same host): then the
+right-most `X-Forwarded-For` entry is used (the one nginx appended; earlier
+entries are client-controlled), falling back to `X-Real-IP`. Values that are
+not valid IPs are ignored, IPv6 zones are dropped. From a non-loopback peer
+both headers are ignored, so they cannot be spoofed. nginx should set both:
+
+```nginx
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Real-IP       $remote_addr;
+```

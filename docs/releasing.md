@@ -45,7 +45,7 @@ Run locally to preview: `scripts/next-version.sh minor rc` (uses local tags; run
 2. `release` job (the only one with `contents: write`): uses the version from the `test` job output, creates an annotated tag on the checked-out commit as `github-actions[bot]`, pushes it, then runs `goreleaser release --clean` with `GITHUB_TOKEN`.
 3. GoReleaser publishes the GitHub Release with GitHub-generated release notes.
 
-All actions and the GoReleaser and golangci-lint versions are pinned (actions to full commit SHAs); Dependabot (`.github/dependabot.yml`) proposes weekly updates for the actions and the Go modules. The release job builds without a cache.
+All actions and the GoReleaser and golangci-lint versions are pinned (actions to full commit SHAs); Dependabot (`.github/dependabot.yml`) proposes weekly updates for the actions and the Go modules; the GoReleaser and golangci-lint versions (`with: version:` in `release.yml`) are bumped by hand. golangci-lint must be able to read the export data of the Go patch release that `setup-go` resolves from `go.mod` (the latest patch of the `go.mod` minor version), so a new Go patch release can require a golangci-lint bump. The release job builds without a cache.
 
 Only one release runs at a time (`concurrency: release`). Releases are published non-draft, so failures need manual cleanup (see below). Because the version is computed before the gates run and the tag is pushed afterwards, a tag created by someone else in between makes the push fail; just re-run.
 

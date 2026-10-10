@@ -71,7 +71,7 @@ func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger, opts ...Opti
 	for _, o := range opts {
 		o(s)
 	}
-	s.limits = newLimiters(cfg.OAuth.RateLimit, func() time.Time { return s.now() })
+	s.limits = newLimiters(cfg.OAuth.RateLimit, cfg.OAuth.CodeTTL, func() time.Time { return s.now() })
 	return s
 }
 

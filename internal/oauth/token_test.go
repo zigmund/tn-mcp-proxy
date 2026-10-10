@@ -407,8 +407,9 @@ func TestTokenRefreshFamiliesIndependent(t *testing.T) {
 	e.wantOK(t, e.do(e.refreshForm(e.none, a0)))
 	e.wantErr(t, e.do(e.refreshForm(e.none, a0)), 400, "invalid_grant")
 	e.wantOK(t, e.do(e.refreshForm(e.none, b0)))
-	if len(e.srv.families.seen) != 2 {
-		t.Errorf("family entries = %d, want 2", len(e.srv.families.seen))
+	// a is revoked (kept in the revocation set), b is active.
+	if len(e.srv.families.seen) != 1 || len(e.srv.families.revs.exp) != 1 {
+		t.Errorf("active = %d, revoked = %d, want 1 and 1", len(e.srv.families.seen), len(e.srv.families.revs.exp))
 	}
 }
 
@@ -685,4 +686,13 @@ func TestTokenRefreshTTLLoweredKeepsEntry(t *testing.T) {
 	e.now.Add(2 * 3600) // past the new TTL, g0 still valid (30d)
 	e.wantErr(t, e.do(e.refreshForm(e.none, g0)), 400, "invalid_grant")
 	e.wantErr(t, e.do(e.refreshForm(e.none, g1)), 400, "invalid_grant") // expired anyway or revoked
+}
+
+// A full revocation set refuses unknown families with 503, never a token.
+func TestTokenRefreshRevocationSetFull(t *testing.T) {
+	e := newTK(t)
+	_, g0 := e.wantOK(t, e.do(e.codeForm(e.none, e.code(t, e.none, nil))))
+	e.srv.families.revs = newRevocationSet(1)
+	e.srv.families.revs.add(1, fixedNow.Add(24*time.Hour), fixedNow)
+	e.wantErr(t, e.do(e.refreshForm(e.none, g0)), 503, "server_error")
 }

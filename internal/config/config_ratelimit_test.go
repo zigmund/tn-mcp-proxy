@@ -54,18 +54,45 @@ oauth:
 	}
 }
 
+func TestRateLimitAuthorizeGlobal(t *testing.T) {
+	cfg, err := Parse([]byte(base()), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unset stays zero: the OAuth server derives it from code_ttl.
+	if g := cfg.OAuth.RateLimit.AuthorizeGlobal; g != (Limit{}) {
+		t.Errorf("default authorize_global = %+v, want zero (derived)", g)
+	}
+	cfg, err = Parse([]byte(base()+"\noauth:\n  rate_limit:\n    authorize_global: { per_minute: 99 }\n"), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := cfg.OAuth.RateLimit.AuthorizeGlobal; g != (Limit{PerMinute: 99}) {
+		t.Errorf("authorize_global = %+v", g)
+	}
+}
+
+func TestRateLimitGlobalBurstNeedsPerMinute(t *testing.T) {
+	_, err := Parse([]byte(base()+"\noauth:\n  rate_limit:\n    authorize_global: { burst: 5 }\n"), ".")
+	if err == nil || !strings.Contains(err.Error(), "oauth.rate_limit.authorize_global.burst") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestRateLimitNegativeRejected(t *testing.T) {
 	y := base() + `
 oauth:
   rate_limit:
     register: { per_minute: -1 }
     token: { burst: -5 }
+    authorize_global: { per_minute: -1, burst: -2 }
 `
 	_, err := Parse([]byte(y), ".")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, f := range []string{"oauth.rate_limit.register.per_minute", "oauth.rate_limit.token.burst"} {
+	for _, f := range []string{"oauth.rate_limit.register.per_minute", "oauth.rate_limit.token.burst",
+		"oauth.rate_limit.authorize_global.per_minute", "oauth.rate_limit.authorize_global.burst"} {
 		if !strings.Contains(err.Error(), f) {
 			t.Errorf("error lacks %s: %v", f, err)
 		}

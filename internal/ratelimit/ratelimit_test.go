@@ -205,3 +205,142 @@ func TestClockStepBackDoesNotMintTokens(t *testing.T) {
 		t.Fatal("backwards clock minted a token")
 	}
 }
+
+func TestKeys(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"203.0.113.7", []string{"203.0.113.7"}},
+		{"::ffff:203.0.113.7", []string{"203.0.113.7"}},
+		{"2001:db8:1:2:3:4:5:6", []string{"2001:db8:1:2::/64", "2001:db8:1::/56", "2001:db8:1::/48"}},
+		{"2001:db8:1:ff03::1", []string{"2001:db8:1:ff03::/64", "2001:db8:1:ff00::/56", "2001:db8:1::/48"}},
+		{"fe80::1%eth0", []string{"fe80::/64", "fe80::/56", "fe80::/48"}},
+		{"weird", []string{"weird"}},
+	}
+	for _, tt := range tests {
+		got := Keys(tt.in)
+		if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+			t.Errorf("Keys(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+// tiers builds the per-tier limiters the way the OAuth server does.
+func tiers(clk *fakeClock, perMinute, burst int) []*Limiter {
+	mk := func(scale int) *Limiter { return New(perMinute*scale, burst*scale, WithClock(clk.now)) }
+	return []*Limiter{mk(1), mk(Scale56), mk(Scale48)}
+}
+
+func TestChargeRotating64sExhaustPrefixBudget(t *testing.T) {
+	clk := newClock()
+	ls := tiers(clk, 60, 2) // /64: 2, /56: 8, /48: 32
+	// Every request comes from a fresh /64 of one /48 (all in different /56s
+	// so only the /48 tier can stop it): the /48 budget is the ceiling.
+	var allowed int
+	for i := range 256 {
+		ip := fmt.Sprintf("2001:db8:1:%x::1", i<<8) // one /64 per /56
+		if ok, _ := Charge(ls, Keys(ip)); ok {
+			allowed++
+		}
+	}
+	if allowed != 2*Scale48 {
+		t.Fatalf("allowed = %d from rotating /64s, want the /48 burst %d", allowed, 2*Scale48)
+	}
+	// Rotating /64s inside one /56 stop at the /56 budget.
+	ls = tiers(clk, 60, 2)
+	allowed = 0
+	for i := range 1000 {
+		if ok, _ := Charge(ls, Keys(fmt.Sprintf("2001:db8:1:%x::1", 0x100+i%256))); ok {
+			allowed++
+		}
+	}
+	if allowed != 2*Scale56 {
+		t.Fatalf("allowed = %d within one /56, want %d", allowed, 2*Scale56)
+	}
+}
+
+func TestChargeIndependentPrefixesAndIPv4(t *testing.T) {
+	clk := newClock()
+	ls := tiers(clk, 60, 1)
+	for i := range Scale48 { // exhaust one /48 (distinct /56s)
+		Charge(ls, Keys(fmt.Sprintf("2001:db8:1:%x::1", i<<8)))
+	}
+	if ok, _ := Charge(ls, Keys("2001:db8:1:ff01::1")); ok {
+		t.Fatal("exhausted /48 still allows")
+	}
+	if ok, _ := Charge(ls, Keys("2001:db8:2::1")); !ok {
+		t.Fatal("a different /48 must be independent")
+	}
+	if ok, _ := Charge(ls, Keys("203.0.113.7")); !ok {
+		t.Fatal("IPv4 affected by IPv6 tiers")
+	}
+	if ok, _ := Charge(ls, Keys("::ffff:203.0.113.7")); ok {
+		t.Fatal("IPv4-mapped IPv6 must share the IPv4 bucket")
+	}
+	if ok, _ := Charge(ls, Keys("203.0.113.8")); !ok {
+		t.Fatal("other IPv4 address limited")
+	}
+}
+
+func TestChargeRefundsOnDenial(t *testing.T) {
+	clk := newClock()
+	// The /64 tier has room, the /48 tier is exhausted: the denied request
+	// must not cost /64 tokens.
+	ls := []*Limiter{New(60, 3, WithClock(clk.now)), New(60, 1, WithClock(clk.now))}
+	k1 := []string{"a", "p"}
+	if ok, _ := Charge(ls, k1); !ok {
+		t.Fatal("first denied")
+	}
+	for range 5 {
+		if ok, wait := Charge(ls, k1); ok || wait <= 0 {
+			t.Fatalf("ok = %v, wait = %v", ok, wait)
+		}
+	}
+	clk.advance(time.Second) // /48 refilled one token
+	for i := range 2 {       // /64 still has its 2 remaining tokens
+		if ok, _ := Charge(ls, []string{"a", fmt.Sprint("q", i)}); !ok {
+			t.Fatalf("request %d denied: denials leaked /64 tokens", i)
+		}
+	}
+}
+
+func TestTakeDeniedRateLimited(t *testing.T) {
+	clk := newClock()
+	l := New(1, 1, WithClock(clk.now))
+	if n := l.TakeDenied(clk.now(), time.Minute); n != 0 {
+		t.Fatalf("n = %d before any denial", n)
+	}
+	l.Allow("k")
+	l.Allow("k")
+	l.Allow("k")
+	if n := l.TakeDenied(clk.now(), time.Minute); n != 2 {
+		t.Fatalf("first report = %d, want 2", n)
+	}
+	l.Allow("k")
+	if n := l.TakeDenied(clk.now().Add(30*time.Second), time.Minute); n != 0 {
+		t.Fatalf("reported within the interval: %d", n)
+	}
+	if n := l.TakeDenied(clk.now().Add(time.Minute), time.Minute); n != 1 {
+		t.Fatalf("accumulated = %d, want 1", n)
+	}
+}
+
+func TestChargeConcurrent(t *testing.T) {
+	clk := newClock()
+	ls := tiers(clk, 600, 50)
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 2000 {
+				Charge(ls, Keys(fmt.Sprintf("2001:db8:%x:%x::1", g, i%50)))
+				if i%500 == 0 {
+					clk.advance(time.Second)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}

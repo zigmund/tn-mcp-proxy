@@ -33,6 +33,20 @@ oauth:
     - https://claude.ai/api/mcp/auth_callback
     - https://claude.com/api/mcp/auth_callback
 
+  # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
+  # /oauth/token (429 + Retry-After). Zero or unset values mean these defaults;
+  # they are generous because claude.ai uses shared egress IPs.
+  # rate_limit:
+  #   disabled: false
+  #   register:  { per_minute: 60,  burst: 30 }
+  #   token:     { per_minute: 300, burst: 100 }
+  #   authorize: { per_minute: 30,  burst: 10 }
+
+# Reverse proxies whose X-Forwarded-For / X-Real-IP are trusted for the client IP
+# (access log and rate limiting). CIDRs or bare IPs; default: loopback only.
+# Setting it replaces the default, so keep loopback if nginx runs locally.
+# trusted_proxies: ["127.0.0.0/8", "::1/128", "192.0.2.0/24"]
+
 upstreams:
   - name: tn                       # [a-z0-9-]+, unique
     title: Tradernet               # shown on the authorize form (default: name)

@@ -118,8 +118,8 @@ nothing (the unit's `ExecReload` is harmless).
 
 The service listens on plain HTTP (built-in TLS is not implemented yet; setting
 `tls.*` makes it exit at startup), so terminate TLS in front of it. A tested
-nginx snippet (no buffering, long timeouts, `X-Forwarded-For` overwrite, rate
-limit for `/oauth/`) is in [docs/configuration.md](docs/configuration.md#reverse-proxy).
+nginx snippet (no buffering, long timeouts, `X-Forwarded-For` overwrite, optional
+extra rate limit for `/oauth/`) is in [docs/configuration.md](docs/configuration.md#reverse-proxy).
 `GET /healthz` returns 200 and is meant for local checks.
 
 ## Connect claude.ai
@@ -172,7 +172,7 @@ to reconnect the connector. Do not rely on a plain restart to cut off a leak
   casual restarts after a suspected token leak; rotate keys instead (above).
 - Refresh tokens are single-use and rotated on every refresh; presenting an already used one revokes its whole chain (the user reconnects).
 - Redirect URIs are restricted to `oauth.allowed_redirect_uris` (claude.ai and claude.com callbacks by default).
-- Rate limit `/oauth/*` at the reverse proxy (the nginx snippet does, 30 r/min per IP, burst 30): the caches are bounded and abuse could fill them (the app then fails closed with 503 for legitimate users). claude.ai calls register/token from shared egress IPs, so keep the limit generous, and restore the real client IP first if you sit behind a CDN or load balancer.
+- `POST /oauth/register`, `/oauth/authorize` and `/oauth/token` are rate limited per client IP by the app itself (generous defaults, `oauth.rate_limit`; excess requests get 429 with `Retry-After`): the replay caches are bounded and abuse could fill them (the app then fails closed with 503 for legitimate users). The client IP honours `X-Forwarded-For` only from `trusted_proxies` (loopback by default); add your CDN or load balancer there. A reverse-proxy `limit_req` (the nginx snippet has one) is an optional extra layer. Known limitation: this raises the cost of filling the caches but does not prevent it; with the defaults about 100 source addresses (or one IPv6 /48) can fill the refresh-family cache within roughly 30 minutes, after which new logins' first refresh gets 503 until entries expire (details in [docs/architecture.md](docs/architecture.md)). See [docs/configuration.md](docs/configuration.md#rate-limiting).
 - Tokens, credentials and query strings are never logged.
 - The service runs as a dynamic unprivileged user under a restrictive systemd sandbox.
 

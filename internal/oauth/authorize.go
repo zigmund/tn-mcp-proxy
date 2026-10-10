@@ -253,7 +253,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return nil
 	}
 
-	jti, err := newJTI()
+	jti, err := newID()
 	if err != nil {
 		s.log.Error("generating code id", "err", err)
 		return redirectFailure(req.RedirectURI, req.State, codeServerError, "internal error")
@@ -262,6 +262,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	if ttl <= 0 {
 		ttl = config.DefaultCodeTTL
 	}
+	exp := s.now().Add(ttl)
 	code, err := s.sealer.Seal(seal.KindCode, tokens.Code{
 		ClientID:      req.ClientID,
 		RedirectURI:   req.RedirectURI,
@@ -269,7 +270,8 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		Upstream:      up.Name,
 		Creds:         creds,
 		JTI:           jti,
-	}, s.now().Add(ttl))
+		Exp:           exp.Unix(),
+	}, exp)
 	if err != nil {
 		// Never log the payload: it carries credentials.
 		s.log.Error("sealing authorization code", "err", err)
@@ -509,7 +511,7 @@ func validChallenge(c string) bool {
 	}) < 0
 }
 
-func newJTI() (string, error) {
+func newID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("reading random: %w", err)

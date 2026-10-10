@@ -383,15 +383,28 @@ pruned lazily (at most once a minute, once a second while full).
   `POST /oauth/authorize` also has a global token bucket derived from the code
   cache size and `code_ttl` (`50000 / 4 / minutes(code_ttl)` per minute, 2 500
   by default, burst of one minute): at most 15 000 codes can be live at once,
-  30% of the cache. Hitting it answers 429 with `Retry-After` and logs at warn
-  (at most once a minute).
+  30% of the cache. It is charged at the point where a code is about to be
+  sealed (after form parsing, the size budget, the `allowed_values` check and
+  the `validate` check), so only submissions that actually yield a code spend
+  it; foreign or garbage submissions cannot lock the owner out. They are
+  bounded by the per-IP tiers, which are charged up front. The aggregate rate
+  of upstream `validate` calls is not globally capped: it is bounded by the
+  per-IP tiers and the checker's 16-slot semaphore, and saturating the slots
+  makes `validate` answer 503 (also to the owner) until the validate timeout.
+  `allowed_values` on any public upstream that uses `validate` refuses foreign
+  keys before any upstream call.
+  Hitting the ceiling answers 429 with `Retry-After` (the same error page as the
+  per-IP limit; the per-IP token stays spent) and logs at warn (at most once a
+  minute).
 
   Costs with the defaults (attacker's side; every family needs one login, one
   token exchange and one refresh, so authorize is the binding limit):
   - Code cache: cannot be filled through authorize; at the ceiling 15 000 of
-    50 000 slots at most. The ceiling can be saturated, which delays new
-    logins (429, recovers right after the flood stops): from IPv4 it takes
-    about 83 addresses at 30/min, or 5 to 6 IPv6 `/48`s (480/min each).
+    50 000 slots at most. The ceiling can be saturated only by submissions
+    that yield a code (with `validate`, credentials the upstream accepts; with
+    an allow-list, an allowed key), which delays new logins (429, recovers right
+    after the flood stops): from IPv4 it takes about 83 addresses at 30/min, or
+    5 to 6 IPv6 `/48`s (480/min each).
   - Active families: a chain touched hourly (the default access token TTL) is
     evicted once 100 000 newer families appear within the hour. One IPv6 `/48`
     creates at most 28 800 per hour, so about 4 `/48`s, 56 IPv4 addresses, or

@@ -24,9 +24,11 @@ const (
 	// recheckTTL is how long an accepted or rejected verdict is reused. A burst
 	// of tool errors from one token costs at most one check per TTL.
 	recheckTTL = 60 * time.Second
-	// unavailableTTL briefly remembers "no verdict" so an upstream outage is
-	// not hammered by every failing call.
-	unavailableTTL = 5 * time.Second
+	// unavailableTTL remembers "no verdict" for as long as a real verdict, so
+	// during an upstream outage a failing token still costs at most one check
+	// session per minute (saturation, which is not cached, aside). The price is
+	// that a revocation is noticed up to a minute after the upstream recovers.
+	unavailableTTL = recheckTTL
 	// maxRecheckEntries bounds the verdict cache (about 100 bytes each).
 	maxRecheckEntries = 4096
 	// maxConcurrentRechecks bounds simultaneous upstream check sessions. When
@@ -169,6 +171,23 @@ func (r *Rechecker) recheck(ctx context.Context, up config.Upstream, creds map[s
 	case <-ctx.Done():
 		return verdictUnknown
 	}
+}
+
+// Rejected reports whether a live cached verdict says the upstream refuses
+// creds. It only reads the cache (keyed exactly like recheck): it never
+// contacts the upstream, starts a check or waits for one, so it is cheap
+// enough for the token endpoint. No entry, an expired entry, "accepted" and
+// "no verdict" all answer false.
+func (r *Rechecker) Rejected(upstream string, creds map[string]string) bool {
+	key := r.cacheKey(upstream, creds)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	el, ok := r.cache[key]
+	if !ok {
+		return false
+	}
+	e := el.Value.(*cacheEntry)
+	return e.v == verdictRejected && r.now().Before(e.expires)
 }
 
 // run executes one check, publishes its verdict and releases the slot.

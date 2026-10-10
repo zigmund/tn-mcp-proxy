@@ -427,8 +427,8 @@ func TestRecheckAcceptedIsCached(t *testing.T) {
 	}
 }
 
-// "No verdict" is remembered only briefly.
-func TestRecheckUnavailableCachedShortly(t *testing.T) {
+// "No verdict" is cached for unavailableTTL (60 s), so an outage is not hammered.
+func TestRecheckUnavailableIsCached(t *testing.T) {
 	clock := new(atomic.Int64)
 	clock.Store(1_000)
 	rc := quietRechecker()
@@ -438,7 +438,7 @@ func TestRecheckUnavailableCachedShortly(t *testing.T) {
 	wantPassthrough(t, e.post(t, "identity"), []byte(toolErrBody))
 	wantPassthrough(t, e.post(t, "identity"), []byte(toolErrBody))
 	if n := e.validations(); n != 1 {
-		t.Fatalf("sessions = %d, want 1 within the short TTL", n)
+		t.Fatalf("sessions = %d, want 1 within the TTL", n)
 	}
 	clock.Add(int64(unavailableTTL/time.Second) + 1)
 	wantPassthrough(t, e.post(t, "identity"), []byte(toolErrBody))

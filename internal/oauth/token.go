@@ -280,6 +280,13 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		grant("credentials not in allowed_values")
 		return
 	}
+	// The proxy's re-check confirmed these credentials as rejected (cached
+	// verdict only; no upstream call here). Refusing makes the client re-run
+	// the authorization flow instead of refreshing into another 401.
+	if s.verdicts != nil && s.verdicts.Rejected(up.Name, rt.Creds) {
+		grant("credentials rejected by upstream")
+		return
+	}
 	now := s.now()
 	start := rt.Start
 	if start == 0 {

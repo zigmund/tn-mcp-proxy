@@ -41,6 +41,28 @@ type Server struct {
 	limits   map[string]*ratelimit.Limiter
 	// checker verifies credentials on authorize for upstreams with validate.
 	checker *credcheck.Checker
+	// verdicts, when set, is the proxy's shared re-check verdict cache: the
+	// refresh grant refuses credentials it has confirmed rejected.
+	verdicts RejectionSource
+}
+
+// RejectionSource answers from a cache, without any upstream call, whether
+// the upstream has recently refused the credentials (the proxy's re-check
+// verdict). *proxy.Rechecker implements it.
+type RejectionSource interface {
+	Rejected(upstream string, creds map[string]string) bool
+}
+
+// WithRejectionSource makes the refresh grant answer invalid_grant while the
+// source reports the token's credentials as rejected, so a client that
+// refreshes after a 401 is sent through the authorization flow instead of
+// looping. A nil source is ignored.
+func WithRejectionSource(rs RejectionSource) Option {
+	return func(s *Server) {
+		if rs != nil {
+			s.verdicts = rs
+		}
+	}
 }
 
 // Option configures a Server.

@@ -38,7 +38,68 @@ must own the root `/.well-known/*` and `/oauth/*` paths of its host.
 
 The flow is stateless: client ids, authorization codes and tokens are sealed
 blobs (see Token sealing), so no server-side session or storage exists.
-Details of authorize and token are documented as those endpoints land.
+Details of the token endpoint are documented as it lands.
+
+### Authorization
+
+`GET /oauth/authorize` validates the request and renders the credentials form;
+`POST /oauth/authorize` turns the submitted form into an authorization code.
+Other methods get `405`. No CORS headers are set (the endpoint is only
+navigated to).
+
+**Validation and error policy.** The client is checked first: `client_id` must
+open as a `client` seal (`openClient`) and `redirect_uri` must exactly match
+one of its URIs and still be in `oauth.allowed_redirect_uris`
+(`redirectAllowed`). Until both hold, errors are rendered as an HTML error page
+(`400`) and never redirected, so the endpoint cannot be used as an open
+redirector. Repeated `client_id`/`redirect_uri` parameters are errors too.
+After that, errors are redirected to the `redirect_uri` with `error`,
+`error_description`, `state` and `iss` (RFC 6749 section 4.1.2.1, RFC 9207):
+`unsupported_response_type` (`response_type` is not `code`),
+`invalid_request` (PKCE missing or not `S256`, malformed `code_challenge`,
+`state` over 1 KiB, repeated parameters; an invalid `state` is not echoed back), `invalid_target` (RFC 8707: unknown
+`resource`). `resource` must equal an upstream's public MCP URL
+(`public_url` + `path`); it may be omitted only when exactly one upstream is
+configured.
+
+**Form.** Fields come from the upstream's `credentials` (secrets are password
+inputs). The page names the upstream (`title`), the application name labelled
+"unverified" (it is attacker-controlled, HTML-escaped) and the host the user
+returns to. The validated request is sealed (`seal.KindAuthRequest`, 15 minute
+expiry) into a hidden `request` field. Responses carry `Cache-Control:
+no-store`, `X-Frame-Options: DENY` and a CSP with `default-src 'none'`, the
+single inline stylesheet allowed by hash (no inline script),
+`frame-ancestors 'none'`, `base-uri 'none'` and `form-action 'self'` plus the
+origin of the `redirect_uri` (Chrome applies `form-action` to the redirect
+that follows the POST, so the client's origin must be listed).
+
+**Submission.** The POST body is capped at 32 KiB. Only the sealed `request`
+and the `cred_N` fields are read; the client, redirect and upstream are
+re-validated against the current config, so a revoked redirect or removed
+upstream fails even for an already rendered form. Values are trimmed; a
+required one that is empty, longer than 4 KiB or containing control characters
+re-renders the form (`400`) with a message and without echoing secrets. On
+success the proxy answers `303 See Other` to `redirect_uri?code=...&state=...&iss=...`
+(also for errors found at POST time, so the browser never re-sends the
+credentials; errors found at GET time use `302`). The AS metadata advertises
+`authorization_response_iss_parameter_supported: true` (RFC 9207).
+
+**CSRF.** No cookies or sessions exist, so there is no ambient authority to
+abuse: the only secret in the POST is the credentials the user types, and the
+resulting code goes to an allowlisted redirect whose client verifies its own
+`state`. The sealed field binds every request parameter (a forged or edited
+POST cannot change client, redirect, PKCE challenge or upstream) and expires.
+As defence in depth, a POST declared `Sec-Fetch-Site: cross-site` or
+`same-site` is refused (an absent header, as in older browsers, is allowed:
+this check is defence in depth only). Clickjacking is blocked by `frame-ancestors` and
+`X-Frame-Options`. Credentials are never logged.
+
+**Authorization code.** `seal.KindCode` with `tokens.Code`:
+`c` client_id, `r` redirect_uri, `ch` PKCE S256 challenge, `u` upstream name,
+`h` credentials (canonical header name to value, optional empty ones omitted),
+`j` random 128-bit jti. It expires `oauth.code_ttl` after issue. Being
+stateless, the code is not single-use by itself; the token endpoint verifies
+client, redirect and PKCE.
 
 ### Client registration
 
@@ -167,7 +228,8 @@ cipher is AES-256-GCM. The plaintext is the JSON envelope
 never expires (used for DCR client ids).
 
 **Kind binding.** The AAD is `version || keyID || kind`, where kind is one of
-`client`, `code`, `access`, `refresh`. A token sealed as one kind fails
+`client`, `code`, `access`, `refresh` or `authreq` (the authorize form's hidden
+field). A token sealed as one kind fails
 authentication when opened as another, and the header cannot be altered.
 
 **Sub-keys.** Each configured 32-byte secret is expanded with HKDF-SHA256 into

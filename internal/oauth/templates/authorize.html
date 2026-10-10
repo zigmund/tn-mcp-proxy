@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Connect {{.UpstreamTitle}}</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<h1>Connect {{.UpstreamTitle}}</h1>
+{{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+<div class="box">
+<dl class="meta">
+<dt>Application</dt>
+<dd>{{if .ClientName}}{{.ClientName}} <span class="unverified">(name supplied by the application, unverified){{else}}Unnamed application <span class="unverified">(unverified){{end}}</span></dd>
+<dt>Returns to</dt>
+<dd>{{.RedirectHost}}</dd>
+</dl>
+<form method="post" action="{{.Action}}" autocomplete="off">
+<input type="hidden" name="request" value="{{.Request}}">
+{{range .Fields}}<label for="{{.ID}}">{{.Label}}{{if .Optional}} (optional){{end}}</label>
+<input id="{{.ID}}" name="{{.ID}}" type="{{if .Secret}}password{{else}}text{{end}}" autocomplete="off" autocapitalize="off" spellcheck="false"{{if not .Optional}} required{{end}}{{if .Value}} value="{{.Value}}"{{end}}>
+{{end}}<button type="submit">Authorize</button>
+</form>
+</div>
+<p class="hint">These credentials are encrypted into the access tokens issued to the application above and are not stored by this server. Only continue if you started this connection yourself.</p>
+</body>
+</html>

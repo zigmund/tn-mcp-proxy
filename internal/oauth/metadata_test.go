@@ -45,15 +45,16 @@ func TestAuthServerMetadata(t *testing.T) {
 	for _, base := range []string{"https://mcp.example.com", "http://localhost:8787"} {
 		mux := newMux(t, base, upTN)
 		want := AuthServerMetadata{
-			Issuer:                            base,
-			AuthorizationEndpoint:             base + "/oauth/authorize",
-			TokenEndpoint:                     base + "/oauth/token",
-			RegistrationEndpoint:              base + "/oauth/register",
-			ResponseTypesSupported:            []string{"code"},
-			ResponseModesSupported:            []string{"query"},
-			GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-			CodeChallengeMethodsSupported:     []string{"S256"},
-			TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_post", "client_secret_basic"},
+			Issuer:                 base,
+			AuthorizationEndpoint:  base + "/oauth/authorize",
+			TokenEndpoint:          base + "/oauth/token",
+			RegistrationEndpoint:   base + "/oauth/register",
+			ResponseTypesSupported: []string{"code"},
+			ResponseModesSupported: []string{"query"},
+			AuthorizationResponseIssParameterSupported: true,
+			GrantTypesSupported:                        []string{"authorization_code", "refresh_token"},
+			CodeChallengeMethodsSupported:              []string{"S256"},
+			TokenEndpointAuthMethodsSupported:          []string{"none", "client_secret_post", "client_secret_basic"},
 		}
 		for _, p := range []string{PathAuthServerMetadata, PathOIDCMetadata} {
 			rec := do(mux, http.MethodGet, p)
@@ -150,7 +151,7 @@ func TestRFCKeyNames(t *testing.T) {
 	mux := newMux(t, "https://mcp.example.com", upTN)
 	as := decode[map[string]any](t, do(mux, http.MethodGet, PathAuthServerMetadata))
 	for _, k := range []string{"issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint",
-		"response_types_supported", "response_modes_supported", "grant_types_supported",
+		"response_types_supported", "response_modes_supported", "authorization_response_iss_parameter_supported", "grant_types_supported",
 		"code_challenge_methods_supported", "token_endpoint_auth_methods_supported"} {
 		if _, ok := as[k]; !ok {
 			t.Errorf("AS metadata lacks %q", k)

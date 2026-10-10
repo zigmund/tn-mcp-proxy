@@ -1,0 +1,12 @@
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem;color:#1a1a1a;background:#fafafa}
+h1{font-size:1.3rem}
+.box{background:#fff;border:1px solid #d0d0d0;border-radius:6px;padding:1rem 1.25rem}
+.meta{color:#444;font-size:.9rem}
+.meta dt{font-weight:600;margin-top:.5rem}
+.meta dd{margin:0;overflow-wrap:anywhere}
+.unverified{color:#8a5a00;font-size:.8rem}
+label{display:block;margin-top:1rem;font-weight:600}
+input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:.5rem;margin-top:.25rem;font:inherit;border:1px solid #888;border-radius:4px}
+button{margin-top:1.25rem;padding:.6rem 1.2rem;font:inherit;border:0;border-radius:4px;background:#0b5fff;color:#fff;cursor:pointer}
+.err{color:#a00;font-weight:600}
+.hint{color:#555;font-size:.85rem;margin-top:1rem}

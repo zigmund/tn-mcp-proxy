@@ -261,6 +261,12 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		return nil
 	}
 
+	// Before any upstream call and before sealing: input too long for a token.
+	if !credsFit(up, req, creds) {
+		s.writeForm(w, http.StatusBadRequest, c, up, req, sealed, values, msgCredsTooLong)
+		return nil
+	}
+
 	if msg, status := s.validateCreds(r.Context(), up, creds); msg != "" {
 		if status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", retryAfterUnavailable)

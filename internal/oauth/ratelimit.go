@@ -25,7 +25,10 @@ const (
 	tier56       = "/56"
 	tier48       = "/48"
 	authorizeKey = "authorize"
-	globalKey    = "authorize/global"
+	// formKey is the limiter of GET /oauth/authorize (rendering the form seals
+	// a request, so it is throttled too, far more generously than the POST).
+	formKey   = "authorize_form"
+	globalKey = "authorize/global"
 
 	// globalLogInterval bounds how often the ceiling being hit is logged.
 	globalLogInterval = time.Minute
@@ -81,8 +84,8 @@ func newLimiters(rl config.RateLimit, codeTTL time.Duration, now func() time.Tim
 	mk := func(l config.Limit, scale int) *ratelimit.Limiter {
 		return ratelimit.New(l.PerMinute*scale, l.Burst*scale, ratelimit.WithClock(now))
 	}
-	m := make(map[string]*ratelimit.Limiter, 10)
-	for name, l := range map[string]config.Limit{"register": rl.Register, authorizeKey: rl.Authorize, "token": rl.Token} {
+	m := make(map[string]*ratelimit.Limiter, 13)
+	for name, l := range map[string]config.Limit{"register": rl.Register, authorizeKey: rl.Authorize, "token": rl.Token, formKey: rl.AuthorizeForm} {
 		m[name] = mk(l, 1)
 		m[name+tier56] = mk(l, ratelimit.Scale56)
 		m[name+tier48] = mk(l, ratelimit.Scale48)
@@ -98,13 +101,19 @@ func newLimiters(rl config.RateLimit, codeTTL time.Duration, now func() time.Tim
 	return m
 }
 
-// limit wraps next with the per-IP limiter named name. Only POST requests are
-// counted: other methods are cheap 405s (or, for authorize, not routed here).
+// limit is limitMethod for POST requests: only POSTs are counted, other
+// methods pass through (cheap 405s).
+func (s *Server) limit(name string, deny func(w http.ResponseWriter, r *http.Request), next http.Handler) http.Handler {
+	return s.limitMethod(name, http.MethodPost, deny, next)
+}
+
+// limitMethod wraps next with the per-IP limiter named name, counting only
+// requests of the given method (HEAD counts as GET).
 // A client is charged at every tier of its address (see ratelimit.Keys) and,
 // for authorize, against the global ceiling; the request passes only if all
 // allow it, and a refused one costs no tokens. A denied request gets 429 with
 // Retry-After via deny.
-func (s *Server) limit(name string, deny func(w http.ResponseWriter, r *http.Request), next http.Handler) http.Handler {
+func (s *Server) limitMethod(name, method string, deny func(w http.ResponseWriter, r *http.Request), next http.Handler) http.Handler {
 	lim := s.limits[name]
 	if lim == nil {
 		return next
@@ -119,7 +128,11 @@ func (s *Server) limit(name string, deny func(w http.ResponseWriter, r *http.Req
 		s.warnGlobalOversized()
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		m := r.Method
+		if m == http.MethodHead {
+			m = http.MethodGet
+		}
+		if m != method {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -35,10 +35,10 @@ const (
 	// server, decides when to drop a reused connection.
 	IdleTimeout = 120 * time.Second
 
-	// MaxHeaderBytes caps request headers. Credential values are limited to
-	// 4096 bytes each (maxCredLen); a bearer token sealing 3 maximal values
-	// is about 17 KiB, so 64 KiB leaves ample headroom for the other headers
-	// while staying well below the 1 MiB net/http default.
+	// MaxHeaderBytes caps request headers. A bearer token is at most 16 KiB
+	// (seal.MaxTokenSize; the authorize form rejects credentials that would not
+	// fit), so 64 KiB leaves ample headroom for the other headers while
+	// staying well below the 1 MiB net/http default.
 	MaxHeaderBytes = 64 << 10
 
 	// ShutdownTimeout is how long graceful shutdown waits for in-flight
@@ -83,7 +83,7 @@ func New(cfg *config.Config, sealer *seal.Sealer, log *slog.Logger) (*Server, er
 			ReadHeaderTimeout: ReadHeaderTimeout,
 			IdleTimeout:       IdleTimeout,
 			MaxHeaderBytes:    MaxHeaderBytes,
-			ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+			ErrorLog:          newErrorLog(log),
 		},
 		log:             log,
 		shutdownTimeout: ShutdownTimeout,

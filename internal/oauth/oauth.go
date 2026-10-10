@@ -83,8 +83,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 		mux.Handle("GET "+d.path, d) // also matches HEAD
 		mux.Handle("OPTIONS "+d.path, preflight("GET, HEAD, OPTIONS"))
 	}
-	mux.HandleFunc("GET "+PathAuthorize, s.handleAuthorize) // also matches HEAD
-	// Rate limiting applies to POST only (see ratelimit.go).
+	// GET (also matches HEAD) has its own, more generous per-IP limit.
+	mux.Handle("GET "+PathAuthorize, s.limitMethod(formKey, http.MethodGet, s.denyAuthorize, http.HandlerFunc(s.handleAuthorize)))
 	mux.Handle("POST "+PathAuthorize, s.limit("authorize", s.denyAuthorize, http.HandlerFunc(s.handleAuthorize)))
 	mux.Handle("POST "+PathRegister, s.limit("register", s.denyRegister, http.HandlerFunc(s.handleRegister)))
 	mux.Handle("OPTIONS "+PathRegister, preflight("POST, OPTIONS"))

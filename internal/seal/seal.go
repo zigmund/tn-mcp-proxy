@@ -11,7 +11,7 @@
 // The additional authenticated data is version || keyID || kind, so a token
 // sealed for one [Kind] can never be opened as another, and the header cannot
 // be altered without detection. An exp of 0 (or omitted) means "never expires".
-// Tokens are at most 16 KiB (encoded); Seal refuses to produce larger ones and
+// Tokens are at most [MaxTokenSize] (16 KiB, encoded); Seal refuses to produce larger ones and
 // Open rejects them. Decoding is strict: only the canonical base64url encoding
 // is accepted (no padding, no CR/LF, no non-zero trailing bits), so every
 // token has exactly one valid string form and can be used as a cache key.
@@ -33,6 +33,7 @@
 package seal
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
@@ -44,6 +45,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -76,13 +78,17 @@ var (
 	errNotInitialized = errors.New("seal: Sealer not initialized, use New")
 )
 
+// MaxTokenSize is the largest encoded token Seal produces and Open accepts.
+const MaxTokenSize = 16 << 10
+
 const (
 	version      byte = 1
 	keySize           = 32
 	keyIDSize         = 4
 	nonceSize         = 12
 	headerSize        = 1 + keyIDSize
-	maxTokenSize      = 16 << 10
+	maxTokenSize      = MaxTokenSize
+	gcmTagSize        = 16
 
 	labelAEAD = "tn-mcp-proxy seal v1 aead"
 	labelMAC  = "tn-mcp-proxy seal v1 mac"
@@ -182,6 +188,48 @@ func aad(ver byte, id []byte, kind Kind) []byte {
 	return append(b, kind...)
 }
 
+// marshalJSON encodes v without HTML escaping: <, > and & would otherwise
+// become 6-byte escape sequences and inflate a token for no benefit (tokens
+// are not embedded in HTML). The output decodes identically, so tokens sealed
+// with escaping remain valid.
+func marshalJSON(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// marshalEnvelope returns the plaintext sealed for payload: the JSON envelope.
+func marshalEnvelope(payload any, expUnix int64) ([]byte, error) {
+	d, err := marshalJSON(payload)
+	if err != nil {
+		return nil, fmt.Errorf("seal: encoding payload: %w", err)
+	}
+	if len(d) > maxTokenSize {
+		return nil, errors.New("seal: token too large")
+	}
+	plain, err := marshalJSON(envelope{Exp: expUnix, D: d})
+	if err != nil {
+		return nil, fmt.Errorf("seal: encoding envelope: %w", err)
+	}
+	return plain, nil
+}
+
+// EncodedSize returns the length of the token Seal would produce for payload
+// with the largest possible expiry, without encrypting. Callers use it to
+// reject input that cannot be sealed before doing any other work. It fails
+// only if the payload cannot be encoded.
+func EncodedSize(payload any) (int, error) {
+	plain, err := marshalEnvelope(payload, math.MaxInt64)
+	if err != nil {
+		return 0, err
+	}
+	return base64.RawURLEncoding.EncodedLen(headerSize + nonceSize + len(plain) + gcmTagSize), nil
+}
+
 // Seal encrypts payload (JSON-encoded) into a URL-safe token of the given
 // kind. A zero exp means the token never expires; otherwise exp is truncated
 // to whole seconds and the token is already expired at exp (now >= exp). It
@@ -200,16 +248,9 @@ func (s *Sealer) Seal(kind Kind, payload any, exp time.Time) (string, error) {
 			return "", errors.New("seal: expiry must be after 1970-01-01")
 		}
 	}
-	d, err := json.Marshal(payload)
+	plain, err := marshalEnvelope(payload, expUnix)
 	if err != nil {
-		return "", fmt.Errorf("seal: encoding payload: %w", err)
-	}
-	if len(d) > maxTokenSize {
-		return "", errors.New("seal: token too large")
-	}
-	plain, err := json.Marshal(envelope{Exp: expUnix, D: d})
-	if err != nil {
-		return "", fmt.Errorf("seal: encoding envelope: %w", err)
+		return "", err
 	}
 
 	k := s.keys[0]

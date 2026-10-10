@@ -1,0 +1,114 @@
+# Manual release workflow: test -> tag -> GoReleaser -> GitHub Release.
+# All actions are pinned to full commit SHAs (the comment gives the version);
+# Dependabot (.github/dependabot.yml) proposes updates.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. v1.2.3 or v1.2.3-rc.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Never run two releases at once; queue instead of cancelling.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  test:
+    name: Validate and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate version and ref
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" != "refs/heads/main" ]]; then
+            echo "::error::Releases can only be cut from main (got $REF)"; exit 1
+          fi
+          pre='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          re="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(${pre}(\.${pre})*))?\$"
+          if [[ ! "$VERSION" =~ $re ]]; then
+            echo "::error::Version '$VERSION' must be semver with a v prefix, e.g. v1.2.3 or v1.2.3-rc.1"; exit 1
+          fi
+          git check-ref-format "refs/tags/$VERSION" || { echo "::error::Invalid tag name"; exit 1; }
+          # Fail closed: rc 0 = tag exists, rc 2 = absent, anything else = error.
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1 || rc=$?
+          case "$rc" in
+            2) echo "Tag $VERSION is free" ;;
+            0) echo "::error::Tag $VERSION already exists"; exit 1 ;;
+            *) echo "::error::Could not query remote tags (git exit $rc)"; exit 1 ;;
+          esac
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+
+  release:
+    name: Tag and publish
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # push tag, create release
+    steps:
+      # Credentials are persisted deliberately: the tag push below needs them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      # No build cache in the release job: avoids cache poisoning of artifacts.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Create and push annotated tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Recovery instructions
+        if: failure()
+        run: |
+          echo "::error::Release failed. Clean up before re-running:"
+          echo "  gh release delete \"$VERSION\" --repo \"$GITHUB_REPOSITORY\" --yes   # only if the release was created"
+          echo "  git push origin :refs/tags/$VERSION                                  # delete the remote tag"

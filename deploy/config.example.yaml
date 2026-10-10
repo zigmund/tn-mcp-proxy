@@ -57,9 +57,11 @@ upstreams:
       - { header: X-TN-API-Secret, label: API secret, secret: true }
       - { header: X-TN-SID,        label: SID, optional: true }
 
-# Optional built-in TLS (both files or neither). Relative paths are resolved
-# against this file's directory. reload_interval 0 or unset = default (1m).
-tls:
-  cert_file: ""
-  key_file: ""
-  reload_interval: 1m
+# Optional built-in TLS (both files or neither); leave commented out when a
+# reverse proxy terminates TLS. Relative paths are resolved against this file's
+# directory. The files are re-checked every reload_interval (0 or unset =
+# default 1m) and on SIGHUP; a bad new pair keeps the old certificate.
+# tls:
+#   cert_file: /etc/letsencrypt/live/mcp.example.com/fullchain.pem
+#   key_file: /etc/letsencrypt/live/mcp.example.com/privkey.pem
+#   reload_interval: 1m

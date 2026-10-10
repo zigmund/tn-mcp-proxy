@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -127,7 +128,7 @@ func (s *Server) Handler() http.Handler { return s.http.Handler }
 
 // OnReload registers a hook run on every reload request (SIGHUP). Hooks run
 // sequentially in registration order; an error is logged and does not stop
-// the others. Later tasks (TLS certificate reload) plug in here.
+// the others. TLS certificate reload plugs in here.
 func (s *Server) OnReload(name string, fn func() error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,12 +170,29 @@ func (s *Server) WatchReload(ctx context.Context, sigs <-chan os.Signal) {
 	}
 }
 
+// EnableTLS makes Serve terminate TLS with cfg (which must provide
+// certificates, e.g. via GetCertificate). It must be called before Serve.
+// MinVersion defaults to TLS 1.2; ServeTLS adds h2 and http/1.1 to NextProtos.
+func (s *Server) EnableTLS(cfg *tls.Config) {
+	c := cfg.Clone()
+	if c.MinVersion == 0 {
+		c.MinVersion = tls.VersionTLS12
+	}
+	s.http.TLSConfig = c
+}
+
 // Serve accepts connections on ln until ctx is cancelled, then shuts down
 // gracefully. If in-flight requests (e.g. SSE streams) outlive the shutdown
 // timeout, remaining connections are closed and Serve still returns nil.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	errc := make(chan error, 1)
-	go func() { errc <- s.http.Serve(ln) }()
+	go func() {
+		if s.http.TLSConfig != nil {
+			errc <- s.http.ServeTLS(ln, "", "") // certificates come from TLSConfig
+			return
+		}
+		errc <- s.http.Serve(ln)
+	}()
 
 	select {
 	case err := <-errc:

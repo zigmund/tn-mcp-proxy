@@ -442,7 +442,15 @@ slog logger at `warn`.
 Signals: `SIGINT`/`SIGTERM` start a graceful shutdown (15s). Streams that
 outlive the timeout are closed forcibly and the process still exits 0.
 `SIGHUP` never terminates the process; it runs the registered reload hooks
-(`Server.OnReload`) or logs `reload requested, nothing to reload`. Built-in TLS
-is not implemented yet: a config with `tls.cert_file`/`tls.key_file` makes the
-service fail at startup instead of silently serving plain HTTP. A listen
+(`Server.OnReload`) or logs `reload requested, nothing to reload`. A listen
 failure (e.g. address in use) exits non-zero with the error.
+
+Built-in TLS is optional (`tls.cert_file` + `tls.key_file`). `internal/certreload`
+holds the current `*tls.Certificate` in an `atomic.Pointer` and exposes it as
+`tls.Config.GetCertificate`; `Server.EnableTLS` makes `Serve` use `ServeTLS` with
+that config (TLS 1.2 minimum, `h2` and `http/1.1` ALPN). The pair is loaded
+before listening and a failure is fatal. A watcher goroutine tied to the run
+context compares mtime and size of both files (symlinks followed) every
+`tls.reload_interval` and swaps in a valid new pair; `SIGHUP` registers as an
+`OnReload` hook that forces a reload. A failed reload keeps the old certificate
+and is retried on the next tick. The watcher stops on shutdown.

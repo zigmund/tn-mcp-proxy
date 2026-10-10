@@ -3,7 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -149,18 +157,175 @@ func TestAddressInUse(t *testing.T) {
 	}
 }
 
-func TestTLSFailsFast(t *testing.T) {
+func TestTLSStartupFailsFast(t *testing.T) {
 	dir := t.TempDir()
-	for _, f := range []string{"c.pem", "k.pem"} {
-		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
-			t.Fatal(err)
+	for name, files := range map[string][2]string{
+		"missing": {"nope.pem", "nope-key.pem"},
+		"garbage": {"c.pem", "k.pem"},
+	} {
+		if name == "garbage" {
+			for _, f := range files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("junk"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		cfg := writeConfig(t, testConfig+"tls:\n  cert_file: "+filepath.Join(dir, files[0])+"\n  key_file: "+filepath.Join(dir, files[1])+"\n")
+		var stderr syncBuffer
+		err := execute(context.Background(), []string{"-config", cfg}, &stderr, &stderr, hooks{})
+		if err == nil || !strings.Contains(err.Error(), "loading tls certificate") {
+			t.Errorf("%s: err = %v", name, err)
 		}
 	}
+}
+
+func writeCert(t *testing.T, dir, cn string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		DNSNames:     []string{"localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(90 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	k := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kb})
+	cp, kp := filepath.Join(dir, "c.pem"), filepath.Join(dir, "k.pem")
+	if err := os.WriteFile(cp, c, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kp, k, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	for _, p := range []string{cp, kp} {
+		if err := os.Chtimes(p, future, future); err != nil {
+			t.Fatal(err)
+		}
+		future = future.Add(time.Hour)
+	}
+}
+
+func peerCN(t *testing.T, addr string) string {
+	t.Helper()
+	conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test: self-signed
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	return conn.ConnectionState().PeerCertificates[0].Subject.CommonName
+}
+
+func TestServeTLSWithSIGHUPReload(t *testing.T) {
+	dir := t.TempDir()
+	writeCert(t, dir, "cert-a")
 	cfg := writeConfig(t, testConfig+"tls:\n  cert_file: "+filepath.Join(dir, "c.pem")+"\n  key_file: "+filepath.Join(dir, "k.pem")+"\n")
 	var stderr syncBuffer
-	err := execute(context.Background(), []string{"-config", cfg}, &stderr, &stderr, hooks{})
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("err = %v", err)
+	addrc := make(chan net.Addr, 1)
+	hup := make(chan os.Signal, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- execute(ctx, []string{"-config", cfg}, &stderr, &stderr, hooks{reload: hup, ready: func(a net.Addr) { addrc <- a }})
+	}()
+	var addr net.Addr
+	select {
+	case addr = <-addrc:
+	case err := <-done:
+		t.Fatalf("exited early: %v\n%s", err, stderr.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("not ready")
+	}
+
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}} //nolint:gosec // test: self-signed
+	resp, err := client.Get("https://" + addr.String() + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("healthz %d", resp.StatusCode)
+	}
+	if got := peerCN(t, addr.String()); got != "cert-a" {
+		t.Fatalf("CN = %q", got)
+	}
+
+	writeCert(t, dir, "cert-b")
+	hup <- os.Interrupt
+	deadline := time.Now().Add(5 * time.Second)
+	for peerCN(t, addr.String()) != "cert-b" {
+		if time.Now().After(deadline) {
+			t.Fatalf("cert not reloaded:\n%s", stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	client.CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("shutdown returned %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("no shutdown")
+	}
+}
+
+func TestServeTLSWatcherReload(t *testing.T) {
+	dir := t.TempDir()
+	writeCert(t, dir, "cert-a")
+	cfg := writeConfig(t, testConfig+"tls:\n  cert_file: "+filepath.Join(dir, "c.pem")+"\n  key_file: "+filepath.Join(dir, "k.pem")+"\n  reload_interval: 20ms\n")
+	var stderr syncBuffer
+	addrc := make(chan net.Addr, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- execute(ctx, []string{"-config", cfg}, &stderr, &stderr, hooks{ready: func(a net.Addr) { addrc <- a }})
+	}()
+	var addr net.Addr
+	select {
+	case addr = <-addrc:
+	case err := <-done:
+		t.Fatalf("exited early: %v\n%s", err, stderr.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("not ready")
+	}
+	if got := peerCN(t, addr.String()); got != "cert-a" {
+		t.Fatalf("CN = %q", got)
+	}
+	writeCert(t, dir, "cert-b") // no SIGHUP: the periodic watcher must notice
+	deadline := time.Now().Add(5 * time.Second)
+	for peerCN(t, addr.String()) != "cert-b" {
+		if time.Now().After(deadline) {
+			t.Fatalf("cert not reloaded:\n%s", stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("no shutdown")
 	}
 }
 

@@ -4,3 +4,12 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Build artifacts
+bin/
+*.test
+coverage.out
+/tn-mcp-proxy
+
+# Local config
+/config.yaml

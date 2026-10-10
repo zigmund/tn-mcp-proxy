@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -35,6 +36,25 @@ const (
 	// maxRequestBody caps the client request body forwarded upstream.
 	maxRequestBody = 10 << 20
 )
+
+// forwardedHeaders is the allow-list of client request headers relayed
+// upstream (canonical form); everything else is dropped. It is what MCP
+// Streamable HTTP needs, so a token holder cannot steer the upstream with
+// arbitrary headers. Content-Length and Transfer-Encoding are managed by
+// net/http from the request, not copied. Origin is forwarded because MCP
+// servers validate it (DNS-rebinding protection) and the decision is theirs.
+// Hop-by-hop headers are removed by ReverseProxy before this list applies.
+// Adding any header, in particular a new Mcp-* header from a newer MCP spec
+// draft, needs a deliberate decision.
+var forwardedHeaders = []string{
+	"Accept", "Accept-Encoding", "Content-Type", "Mcp-Session-Id",
+	"Mcp-Protocol-Version", "Last-Event-Id", "User-Agent", "Origin",
+}
+
+// allowHeader lists the MCP Streamable HTTP methods: POST for messages, GET
+// for the SSE stream, DELETE to end a session. The values are also sent in
+// the Allow header of 405 responses.
+const allowHeader = "GET, POST, DELETE"
 
 type credsKey struct{}
 
@@ -105,6 +125,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// unclean variants (a non-empty RawPath means the client used escapes).
 	if r.URL.Path != h.up.Path || (r.URL.RawPath != "" && r.URL.RawPath != h.up.Path) {
 		http.NotFound(w, r)
+		return
+	}
+	// Decided before authentication: no token parsing, no upstream contact.
+	// HEAD and OPTIONS (CORS preflight) are not relayed either; the OAuth
+	// endpoints, not the MCP endpoint, serve browser-facing CORS.
+	switch r.Method {
+	case http.MethodPost, http.MethodGet, http.MethodDelete:
+	default:
+		h.log.Debug("method not allowed", "method", r.Method)
+		w.Header().Set("Allow", allowHeader)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if r.Header.Get("Upgrade") != "" {
@@ -224,8 +255,8 @@ func (h *handler) challengeValue(code, desc string) string {
 	return v + fmt.Sprintf("resource_metadata=%q", h.meta)
 }
 
-// rewrite builds the upstream request: fixed upstream URL, credentials from
-// the token, and no client-identifying or inbound auth headers.
+// rewrite builds the upstream request: fixed upstream URL, only the
+// allow-listed client headers, and credentials from the token.
 func (h *handler) rewrite(pr *httputil.ProxyRequest) {
 	creds, _ := pr.In.Context().Value(credsKey{}).(map[string]string)
 	out := pr.Out
@@ -240,20 +271,23 @@ func (h *handler) rewrite(pr *httputil.ProxyRequest) {
 	out.URL = &u
 	out.Host = h.target.Host
 
-	hd := out.Header
-	for _, k := range []string{"Authorization", "Cookie", "Proxy-Authorization", "X-Real-Ip"} {
-		hd.Del(k)
-	}
-	// ReverseProxy already dropped Forwarded and X-Forwarded-For/Host/Proto;
-	// drop the remaining X-Forwarded-* (Port, Server, ...) too.
-	for k := range hd {
-		if strings.HasPrefix(strings.ToLower(k), "x-forwarded-") {
-			delete(hd, k)
+	// Allow-list: rebuild the headers from the outbound request. Anything not
+	// listed (client IP headers, overrides, cookies, inbound auth, spoofed
+	// credential headers, ...) is dropped.
+	hd := make(http.Header, len(forwardedHeaders)+len(h.hdrs))
+	// Copy from Out: ReverseProxy already removed hop-by-hop headers and the
+	// ones named in Connection, so they cannot pass even if allow-listed.
+	for _, k := range forwardedHeaders {
+		if v, ok := out.Header[k]; ok {
+			hd[k] = slices.Clone(v)
 		}
 	}
-	for _, c := range h.hdrs {
-		hd.Del(c.name) // drop whatever the client sent, even for optional headers
+	if _, ok := hd["User-Agent"]; !ok {
+		// None sent: keep it empty rather than Go's default UA. ReverseProxy
+		// also sets this; it is explicit here because the headers are rebuilt.
+		hd["User-Agent"] = nil
 	}
+	out.Header = hd
 	for k, v := range creds {
 		hd.Set(k, v)
 	}

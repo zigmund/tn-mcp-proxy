@@ -136,6 +136,8 @@ func TestValidation(t *testing.T) {
 		{"public_url relative", "public_url: mcp.example.com\n" + keys + okUp, "public_url"},
 		{"public_url ftp", "public_url: ftp://x\n" + keys + okUp, "public_url"},
 		{"public_url query", "public_url: https://x?a=b\n" + keys + okUp, "must not contain a query"},
+		{"public_url path", "public_url: https://x.example/mcp-proxy\n" + keys + okUp, "public_url: must be an origin without a path"},
+		{"public_url path slash", "public_url: https://x.example/a/b/\n" + keys + okUp, "public_url: must be an origin without a path"},
 		{"public_url fragment", "public_url: https://x#f\n" + keys + okUp, "must not contain a fragment"},
 		{"bad log level", pub + "log: {level: trace}\n" + keys + okUp, "log.level"},
 		{"bad log format", pub + "log: {format: xml}\n" + keys + okUp, "log.format"},

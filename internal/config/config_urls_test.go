@@ -78,7 +78,11 @@ func TestURLPorts(t *testing.T) {
 	}
 	for _, field := range []string{"public_url", "url", "redirect"} {
 		for _, tt := range tests {
-			_, err := Parse([]byte(urlCase(field, tt.in)), ".")
+			in := tt.in
+			if field == "public_url" {
+				in = strings.TrimSuffix(in, "/x") // public_url must not have a path
+			}
+			_, err := Parse([]byte(urlCase(field, in)), ".")
 			if (err == nil) != tt.ok {
 				t.Errorf("%s %q: ok=%v err=%v", field, tt.in, tt.ok, err)
 			}

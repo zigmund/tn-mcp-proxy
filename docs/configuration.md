@@ -10,7 +10,7 @@ Error messages never echo URL or key material.
 | Field | Default | Notes |
 |---|---|---|
 | `listen` | `127.0.0.1:8787` | `host:port`, port 0..65535 |
-| `public_url` | required | Absolute http(s) URL, no userinfo/query/fragment. Normalized: lowercase scheme/host, default port (80/443) dropped, trailing slash stripped |
+| `public_url` | required | Absolute http(s) origin: no path (the proxy owns the host-root `/.well-known/*` and `/oauth/*` paths), userinfo, query or fragment. Normalized: lowercase scheme/host, default port (80/443) dropped, trailing slash stripped |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` (`debug` enables the access log) |
 | `log.format` | `json` | `json`, `text` |
 | `secrets.token_keys` | | Base64 (standard) of 32 bytes each; first key encrypts, others only decrypt |

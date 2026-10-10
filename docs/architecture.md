@@ -6,7 +6,39 @@ _To be written._
 
 ## OAuth flow
 
-_To be written._
+Discovery sequence (claude.ai custom connector):
+
+1. The client calls the MCP endpoint without a token and gets `401` with
+   `WWW-Authenticate: Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource<upstream.path>"`.
+2. It fetches the protected resource metadata (RFC 9728), which names the
+   proxy (`public_url`) as the authorization server.
+3. It fetches the authorization server metadata (RFC 8414). Clients following
+   the 2025-03-26 spec skip steps 1-2 and request
+   `/.well-known/oauth-authorization-server` directly.
+4. It registers via dynamic client registration (`/oauth/register`).
+5. It sends the user to `/oauth/authorize` (PKCE S256 required); the user
+   enters the upstream credentials on the proxy's form.
+6. It exchanges the code at `/oauth/token`, then refreshes with
+   `grant_type=refresh_token`.
+
+| Endpoint | Path | Notes |
+| --- | --- | --- |
+| Protected resource metadata | `/.well-known/oauth-protected-resource<upstream.path>` | One per upstream; the bare path is served only with exactly one upstream |
+| AS metadata | `/.well-known/oauth-authorization-server` | Same document also at `/.well-known/openid-configuration`, a fallback for MCP 2025-06-18 clients (the proxy is not a full OIDC provider) |
+| Client registration | `/oauth/register` | DCR (RFC 7591) |
+| Authorization | `/oauth/authorize` | Authorization code + PKCE S256 |
+| Token | `/oauth/token` | `authorization_code` and `refresh_token` grants |
+
+Metadata documents are static, built once at startup from `public_url` and
+the upstream list, and served with `Cache-Control: public, max-age=300` and
+`Access-Control-Allow-Origin: *` (GET/HEAD, plus `OPTIONS` for CORS preflight). All endpoint URLs are
+absolute and derived from `public_url`, which must be an origin without a path:
+RFC 8414 and RFC 9728 place `/.well-known/*` at the host root, so the proxy
+must own the root `/.well-known/*` and `/oauth/*` paths of its host.
+
+The flow is stateless: client ids, authorization codes and tokens are sealed
+blobs (see Token sealing), so no server-side session or storage exists.
+Details of register, authorize and token are documented as those endpoints land.
 
 ## Proxying
 

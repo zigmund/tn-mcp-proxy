@@ -24,6 +24,10 @@ const (
 	minVerifierLen = 43
 	maxVerifierLen = 128
 
+	// maxStartSkew is how far in the future a refresh token's Start may be
+	// (clock steps between restarts or hosts) before it is rejected.
+	maxStartSkew = 5 * time.Minute
+
 	grantAuthorizationCode = "authorization_code"
 	grantRefreshToken      = "refresh_token"
 )
@@ -221,11 +225,13 @@ func (s *Server) exchangeCode(w http.ResponseWriter, form url.Values, clientID s
 		s.tokenError(w, http.StatusInternalServerError, codeServerError, "internal error")
 		return
 	}
-	s.issue(w, up.Name, clientID, code.Creds, fam, 0)
+	now := s.now()
+	s.issueAt(w, now, up.Name, clientID, code.Creds, fam, 0, now.Unix())
 }
 
 // refresh redeems a refresh token. Refresh tokens are rotated (every success
-// returns a new pair with a fresh sliding expiry) and single-use with reuse
+// returns a new pair with a fresh sliding expiry, capped at the absolute
+// session end, start + oauth.max_session_ttl) and single-use with reuse
 // detection by family: see familyCache.use. The token is spent before the
 // new pair is sealed, so a sealing failure, or a client that loses the
 // response, leaves a spent token and requires re-authorization; the
@@ -262,9 +268,28 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		return
 	}
 	now := s.now()
+	start := rt.Start
+	if start == 0 {
+		// Legacy token issued before Start existed: one-time migration. The
+		// chain starts now, so it gets one fresh max_session_ttl window and
+		// every later rotation carries a real Start.
+		start = now.Unix()
+	}
+	if start < 0 || start > now.Unix()+int64(maxStartSkew/time.Second) {
+		// Start is minted by this server, so a value in the future means a
+		// forged or corrupt payload (or a big clock step back). Bounding it
+		// by now+skew also keeps the sum below from overflowing.
+		grant("session start out of range")
+		return
+	}
+	if now.Unix() >= start+int64(s.maxSessionTTL()/time.Second) {
+		// Absolute lifetime reached; same generic answer as any other dead token.
+		grant("session lifetime exceeded")
+		return
+	}
 	// The entry must outlive every token it covers, also when the TTL was
 	// lowered since rt was issued (the cache additionally never shortens it).
-	newExp := now.Add(s.refreshTTL())
+	newExp := s.cappedExp(now, s.refreshTTL(), start)
 	if old := time.Unix(rt.Exp, 0); old.After(newExp) {
 		newExp = old
 	}
@@ -296,7 +321,7 @@ func (s *Server) refresh(w http.ResponseWriter, form url.Values, clientID string
 		s.cacheFull(w, "refresh token", &s.families.full)
 		return
 	}
-	s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1)
+	s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1, start)
 }
 
 // cacheFull answers a token request that cannot be tracked because a cache
@@ -346,24 +371,23 @@ func (s *Server) checkResource(w http.ResponseWriter, form url.Values, up config
 	return false
 }
 
-// issue seals a fresh access and refresh token pair and writes the response.
-func (s *Server) issue(w http.ResponseWriter, upstream, clientID string, creds map[string]string, fam string, gen int64) {
-	s.issueAt(w, s.now(), upstream, clientID, creds, fam, gen)
-}
-
-// issueAt is issue with an explicit clock reading, so the refresh token's
-// expiry equals the one already recorded in the family cache.
-func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientID string, creds map[string]string, fam string, gen int64) {
+// issueAt seals a fresh access and refresh token pair and writes the
+// response. It takes an explicit clock reading, so the refresh token's expiry
+// equals the one already recorded in the family cache. start is the unix time
+// of the login (see tokens.Refresh); both expiries are capped at start plus
+// oauth.max_session_ttl, and the caller guarantees now is before that.
+func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientID string, creds map[string]string, fam string, gen, start int64) {
 	accessTTL, refreshTTL := s.cfg.OAuth.AccessTokenTTL, s.refreshTTL()
 	if accessTTL <= 0 {
 		accessTTL = config.DefaultAccessTokenTTL
 	}
-	access, err := s.sealer.Seal(seal.KindAccess, tokens.Access{Upstream: upstream, ClientID: clientID, Creds: creds}, now.Add(accessTTL))
+	accessExp := s.cappedExp(now, accessTTL, start)
+	access, err := s.sealer.Seal(seal.KindAccess, tokens.Access{Upstream: upstream, ClientID: clientID, Creds: creds}, accessExp)
 	var refresh string
 	if err == nil {
-		refreshExp := now.Add(refreshTTL)
+		refreshExp := s.cappedExp(now, refreshTTL, start)
 		refresh, err = s.sealer.Seal(seal.KindRefresh, tokens.Refresh{
-			Upstream: upstream, ClientID: clientID, Creds: creds, Family: fam, Gen: gen, Exp: refreshExp.Unix(),
+			Upstream: upstream, ClientID: clientID, Creds: creds, Family: fam, Gen: gen, Exp: refreshExp.Unix(), Start: start,
 		}, refreshExp)
 	}
 	if err != nil {
@@ -374,11 +398,30 @@ func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientI
 	}
 	s.log.Debug("tokens issued", "upstream", upstream)
 	s.writeTokenJSON(w, http.StatusOK, tokenResponse{
-		AccessToken:  access,
-		TokenType:    "Bearer",
-		ExpiresIn:    int64(accessTTL / time.Second),
+		AccessToken: access,
+		TokenType:   "Bearer",
+		// Whole-second difference, like the gate in refresh: at least 1 for any
+		// request that passed it, and the TTL itself when uncapped.
+		ExpiresIn:    accessExp.Unix() - now.Unix(),
 		RefreshToken: refresh,
 	})
+}
+
+// cappedExp returns now+ttl, but never later than the end of the session that
+// began at start (unix seconds): start plus oauth.max_session_ttl.
+func (s *Server) cappedExp(now time.Time, ttl time.Duration, start int64) time.Time {
+	exp := now.Add(ttl)
+	if end := time.Unix(start+int64(s.maxSessionTTL()/time.Second), 0); end.Before(exp) {
+		return end
+	}
+	return exp
+}
+
+func (s *Server) maxSessionTTL() time.Duration {
+	if ttl := s.cfg.OAuth.MaxSessionTTL; ttl > 0 {
+		return ttl
+	}
+	return config.DefaultMaxSessionTTL
 }
 
 func (s *Server) refreshTTL() time.Duration {

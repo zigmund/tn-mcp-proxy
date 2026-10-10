@@ -240,11 +240,17 @@ refresh_token}` (`scope` is omitted: scopes are unused). The access token is
 `seal.KindAccess` with `tokens.Access` (what the proxy opens, checking the
 upstream name), expiring after `oauth.access_token_ttl`; `expires_in` is that
 TTL in seconds. The refresh token is `seal.KindRefresh` with `tokens.Refresh`
-(`u`, `c`, `h`, family `f`, generation `g`, expiry `e`), expiring after
-`oauth.refresh_token_ttl`. Every refresh rotates the pair and restarts the
-refresh expiry, so a client that keeps using its token never has to
-re-authorize (sliding expiry). The credentials travel from the code into
-both tokens unchanged.
+(`u`, `c`, `h`, family `f`, generation `g`, expiry `e`, login start `s`),
+expiring after `oauth.refresh_token_ttl`. Every refresh rotates the pair and
+restarts the refresh expiry (sliding expiry), but the chain has an absolute
+lifetime: `s` is the unix time of the code exchange, copied unchanged on every
+rotation, and a refresh at or after `s + oauth.max_session_ttl` is an
+`invalid_grant`. Refresh expiry, access expiry (and so `expires_in`) are
+capped at that session end. A legacy refresh token without `s` (issued before
+the field existed) is migrated once: its first refresh treats that moment as
+the start, so the new chain is bounded from there on. The credentials travel
+from the code into both tokens unchanged. Nothing is revoked server-side when
+a client disconnects; the chain simply runs out at the idle or absolute limit.
 
 **Single-use caches.** Both are in memory, per process, guarded by a mutex,
 and bounded by constants (not config). Entries expire with the tokens and are
@@ -319,7 +325,8 @@ pruned lazily (at most once a minute, once a second while full).
   everything: a code used before the restart can be redeemed again until
   `oauth.code_ttl` has passed (PKCE still binds it to the original client),
   and a refresh token used before the restart is accepted once more until its
-  expiry (up to `oauth.refresh_token_ttl`), even if its family was revoked.
+  expiry (up to `oauth.refresh_token_ttl`, and never past the session end),
+  even if its family was revoked.
 - **Reuse detection revokes the family, not issued access tokens.** Reusing a
   spent refresh token revokes its family, so the legitimate client's next
   refresh fails and it re-authorizes (the OAuth 2.1 / BCP behavior). Access

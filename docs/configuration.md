@@ -16,7 +16,8 @@ Error messages never echo URL or key material.
 | `secrets.token_keys` | | Base64 (standard) of 32 bytes each; first key encrypts, others only decrypt |
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
 | `oauth.access_token_ttl` | `1h` | Positive duration |
-| `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry) |
+| `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry), but never beyond `oauth.max_session_ttl` |
+| `oauth.max_session_ttl` | `2160h` (90 days) | Positive duration; absolute lifetime of a login, counted from the code exchange and never extended by refreshing. Once it has passed, the refresh grant fails with `invalid_grant` and the user must reconnect; refresh and access token expiry (and `expires_in`) are capped at the session end. Refresh tokens issued before this setting existed carry no start time: their first refresh after an upgrade starts a fresh window, so existing logins get a full `max_session_ttl` from then on. There is no upper bound |
 | `oauth.code_ttl` | `5m` | Positive duration; lifetime of an authorization code from submission of the credentials form. Codes are single-use |
 | `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute http(s) URLs, no duplicates |
 | `oauth.rate_limit.disabled` | `false` | Turns the in-app per-IP rate limiting of the OAuth endpoints off. See [Rate limiting](#rate-limiting) |
@@ -150,6 +151,17 @@ openssl rand -base64 32
 Rotation: prepend a new key to `token_keys` (or the keys file) so it becomes the
 encrypting key, keep the old key for decryption, and drop the old key once
 `oauth.refresh_token_ttl` has passed, when no token sealed with it remains valid.
+That is an upper bound: chains also end at `oauth.max_session_ttl` from the
+original login, so many end sooner (whichever limit comes first).
+
+Upgrade tradeoff: a legacy refresh token (issued before `oauth.max_session_ttl`
+existed), including a stolen one, gets a full fresh `max_session_ttl` window
+from its first refresh after the upgrade.
+
+Disconnecting a connector in claude.ai or ChatGPT does not revoke anything on
+the proxy (there is no revocation endpoint): its refresh chain stays valid until
+the `oauth.refresh_token_ttl` idle expiry or `oauth.max_session_ttl`, whichever
+comes first. Removing the old token key is the way to cut every login off at once.
 
 ## Logging
 

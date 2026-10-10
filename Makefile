@@ -5,7 +5,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := build
-.PHONY: build build-linux test vet lint fmt clean
+.PHONY: build build-linux test vet lint fmt clean test-scripts
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(CMD)
@@ -32,3 +32,6 @@ fmt:
 
 clean:
 	rm -rf $(BIN_DIR) coverage.out
+
+test-scripts:
+	scripts/next-version_test.sh

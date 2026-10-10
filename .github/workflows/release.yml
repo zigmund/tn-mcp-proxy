@@ -6,9 +6,18 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Release version, e.g. v1.2.3 or v1.2.3-rc.1'
+      bump:
+        description: 'Which part of the latest stable version to bump (no tags yet: first release is v0.1.0)'
         required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      prerelease:
+        description: 'Optional pre-release id, e.g. rc (gives vX.Y.Z-rc.N). Leave empty for a final release.'
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -19,20 +28,24 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-env:
-  VERSION: ${{ inputs.version }}
-
 jobs:
   test:
     name: Validate and test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      # Computed once here and reused by the release job so both agree.
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history and tags: needed for the commit list since the previous tag.
+          fetch-depth: 0
+          # No credentials: ls-remote below relies on the repo being public
+          # (a private fork would need credentials; it fails closed).
           persist-credentials: false
 
-      - name: Validate version and ref
+      - name: Check ref
         env:
           REF: ${{ github.ref }}
         run: |
@@ -40,10 +53,27 @@ jobs:
           if [[ "$REF" != "refs/heads/main" ]]; then
             echo "::error::Releases can only be cut from main (got $REF)"; exit 1
           fi
+
+      - name: Test version script
+        run: scripts/next-version_test.sh
+
+      - name: Compute and validate version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # Remote tags are the source of truth; pipefail makes a failed
+          # ls-remote abort instead of silently yielding "no tags".
+          remote_tags="$(git ls-remote --tags --refs origin | sed 's#^.*[[:space:]]refs/tags/##')"
+          VERSION="$(printf '%s\n' "$remote_tags" | scripts/next-version.sh --tags-stdin "$BUMP" "$PRERELEASE")"
+          PREVIOUS="$(printf '%s\n' "$remote_tags" | scripts/next-version.sh --tags-stdin --base "$BUMP")"
+
           pre='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
           re="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(${pre}(\.${pre})*))?\$"
           if [[ ! "$VERSION" =~ $re ]]; then
-            echo "::error::Version '$VERSION' must be semver with a v prefix, e.g. v1.2.3 or v1.2.3-rc.1"; exit 1
+            echo "::error::Computed version '$VERSION' is not valid semver with a v prefix"; exit 1
           fi
           git check-ref-format "refs/tags/$VERSION" || { echo "::error::Invalid tag name"; exit 1; }
           # Fail closed: rc 0 = tag exists, rc 2 = absent, anything else = error.
@@ -54,6 +84,30 @@ jobs:
             0) echo "::error::Tag $VERSION already exists"; exit 1 ;;
             *) echo "::error::Could not query remote tags (git exit $rc)"; exit 1 ;;
           esac
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release $VERSION"
+            echo
+            echo "- Bump: \`$BUMP\`${PRERELEASE:+, pre-release id: \`$PRERELEASE\`}"
+            if [[ -n "$PREVIOUS" ]]; then
+              echo "- Previous stable tag: \`$PREVIOUS\`"
+            else
+              echo "- Previous stable tag: none (first release)"
+            fi
+            echo
+            echo "### Commits since ${PREVIOUS:-the beginning} (first-parent)"
+            echo
+            echo '```'
+            if [[ -n "$PREVIOUS" ]] && git rev-parse -q --verify "refs/tags/$PREVIOUS" >/dev/null; then
+              range="$PREVIOUS..HEAD"
+            else
+              range="HEAD"
+            fi
+            git log -n 200 --first-parent --format='- %s (%h)' "$range"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -75,6 +129,8 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
     permissions:
       contents: write # push tag, create release
     steps:
@@ -94,6 +150,9 @@ jobs:
         id: tag
         run: |
           set -euo pipefail
+          if [[ -z "${VERSION:-}" ]]; then
+            echo "::error::VERSION is empty (test job output missing)"; exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "Release $VERSION"

@@ -3,7 +3,6 @@ package oauth
 import (
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -24,11 +23,11 @@ func TestAuthorizeAllowedValuesRefusesForeignWithoutUpstreamCall(t *testing.T) {
 	form := goodForm(sealed)
 	form.Set("cred_1", "mallory")
 	rec := e.post(form)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), rejectedMsg) {
-		t.Fatalf("status %d, body lacks the generic rejection:\n%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), notAllowedMsg) {
+		t.Fatalf("status %d, body lacks the not-allowed message:\n%s", rec.Code, rec.Body)
 	}
-	if strings.Contains(rec.Body.String(), "allowed") {
-		t.Error("response reveals the allow-list")
+	if strings.Contains(rec.Body.String(), "rejected these credentials") {
+		t.Error("allow-list refusal claims the upstream rejected the credentials")
 	}
 	if n := len(f.requests()); n != 0 {
 		t.Fatalf("foreign credentials reached the upstream (%d requests)", n)
@@ -56,7 +55,7 @@ func TestAuthorizeAllowedValuesWithoutValidate(t *testing.T) {
 	sealed := hidden(t, e.get(e.query(nil)).Body.String())
 	form := goodForm(sealed)
 	form.Set("cred_1", "mallory")
-	if rec := e.post(form); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "rejected these credentials") {
+	if rec := e.post(form); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), notAllowedMsg) {
 		t.Fatalf("status %d:\n%s", rec.Code, rec.Body)
 	}
 	mustSeeOther(t, e.post(goodForm(sealed)))
@@ -75,12 +74,9 @@ func TestRefreshAllowedValues(t *testing.T) {
 	e.wantOK(t, e.do(e.refreshForm(e.none, rt)))
 }
 
-func TestAuthorizeAllowedRefusalIndistinguishable(t *testing.T) {
-	norm := func(s string) string {
-		// The sealed request and the switcher links (which carry the per-env client_id) differ by nonce.
-		s = regexp.MustCompile(`(?s)<nav class="lang".*?</nav>`).ReplaceAllString(s, "")
-		return regexp.MustCompile(`name="request" value="[^"]*"`).ReplaceAllString(s, `name="request" value=""`)
-	}
+// TestAuthorizeAllowedRefusalDistinguishable: an allow-list refusal says so
+// explicitly, while a real upstream rejection keeps the "rejected" message.
+func TestAuthorizeAllowedRefusalDistinguishable(t *testing.T) {
 	post := func(mod func(*config.Upstream)) *httptest.ResponseRecorder {
 		f := newMCPFake(t)
 		f.on("tools/call", rejectingTool())
@@ -92,11 +88,14 @@ func TestAuthorizeAllowedRefusalIndistinguishable(t *testing.T) {
 	}
 	genuine := post(nil)       // no list: the upstream rejects the key
 	refused := post(allowUser) // list: refused before the upstream
-	if genuine.Code != refused.Code || norm(genuine.Body.String()) != norm(refused.Body.String()) {
-		t.Fatalf("responses differ:\ngenuine %d\n%s\nrefused %d\n%s", genuine.Code, genuine.Body, refused.Code, refused.Body)
+	if genuine.Code != http.StatusBadRequest || refused.Code != genuine.Code {
+		t.Fatalf("status genuine %d, refused %d, want both 400", genuine.Code, refused.Code)
 	}
-	if !strings.Contains(genuine.Body.String(), rejectedMsg) {
-		t.Fatal("fixture did not produce the upstream rejection")
+	if !strings.Contains(genuine.Body.String(), rejectedMsg) || strings.Contains(genuine.Body.String(), notAllowedMsg) {
+		t.Fatalf("upstream rejection lost its message:\n%s", genuine.Body)
+	}
+	if !strings.Contains(refused.Body.String(), notAllowedMsg) || strings.Contains(refused.Body.String(), rejectedMsg) {
+		t.Fatalf("allow-list refusal has the wrong message:\n%s", refused.Body)
 	}
 }
 
@@ -107,7 +106,7 @@ func TestAuthorizeAllowedOptionalLeftEmptyRefused(t *testing.T) {
 	})
 	sealed := hidden(t, e.get(e.query(nil)).Body.String())
 	rec := e.post(goodForm(sealed)) // cred_2 (optional) left empty
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), rejectedMsg) {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), notAllowedMsg) {
 		t.Fatalf("status %d:\n%s", rec.Code, rec.Body)
 	}
 	if n := len(f.requests()); n != 0 {

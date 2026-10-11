@@ -345,12 +345,14 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 		return nil
 	}
 
-	// Allow-list: the same generic message as a rejected credential, so the
-	// form does not reveal that one exists. No upstream call for foreign keys.
+	// Allow-list: an explicit "not allowed on this server" message, distinct
+	// from an upstream rejection (the upstream was never asked, and the
+	// operator must be able to tell the two apart). It reveals that a list
+	// exists; that is intended. No upstream call for foreign keys.
 	if !up.CredsAllowed(creds) {
 		s.log.Info("authorize refused: credentials not in allowed_values",
 			append([]any{"upstream", up.Name}, s.audit.Who(s.clientIP(r), up, creds)...)...)
-		form(http.StatusBadRequest, rejectedMessage(up))
+		form(http.StatusBadRequest, uiMsg(msgCredsNotAllowed))
 		return nil
 	}
 

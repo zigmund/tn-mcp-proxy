@@ -21,24 +21,16 @@ func TestAuditValidation(t *testing.T) {
 	tests := []struct {
 		name, audit, creds, log, wantErr string
 	}{
-		{"enabled", "audit: { enabled: true, retention: \"12 months\" }\n", auditCreds, "", ""},
+		{"enabled", "audit: { enabled: true }\n", auditCreds, "", ""},
 		{"disabled needs nothing", "", auditCreds, "", ""},
-		{"disabled with retention", "audit: { retention: \"1 year\" }\n", auditCreds, "", ""},
-		{"retention required", "audit: { enabled: true }\n", auditCreds, "", "audit.retention: required"},
-		{"retention blank", "audit: { enabled: true, retention: \"   \" }\n", auditCreds, "", "audit.retention: required"},
-		{"max length", "audit: { enabled: true, retention: \"" + strings.Repeat("я", MaxAuditRetentionLen) + "\" }\n", auditCreds, "", ""},
-		{"too long", "audit: { enabled: true, retention: \"" + strings.Repeat("a", MaxAuditRetentionLen+1) + "\" }\n", auditCreds, "", "longer than 64"},
-		{"newline", "audit: { enabled: true, retention: \"a\\nb\" }\n", auditCreds, "", "printable"},
-		{"tab", "audit: { enabled: true, retention: \"a\\tb\" }\n", auditCreds, "", "printable"},
-		{"control", "audit: { enabled: true, retention: \"a\\u0007b\" }\n", auditCreds, "", "printable"},
-		{"line separator", "audit: { enabled: true, retention: \"a\\u2028b\" }\n", auditCreds, "", "printable"},
-		{"too long when disabled", "audit: { retention: \"" + strings.Repeat("a", 65) + "\" }\n", auditCreds, "", "longer than 64"},
-		{"audit with secret", "audit: { enabled: true, retention: x }\n",
+		{"retention removed", "audit: { enabled: true, retention: \"12 months\" }\n", auditCreds, "", "field retention not found"},
+		{"retention_i18n removed", "audit: { enabled: true, retention_i18n: { en: x } }\n", auditCreds, "", "field retention_i18n not found"},
+		{"audit with secret", "audit: { enabled: true }\n",
 			"      - { header: X-TN-API-Key, secret: true, audit: true }\n", "", "credentials[0].audit: not allowed together with secret"},
 		{"audit with secret, audit off", "", "      - { header: X-TN-API-Key, secret: true, audit: true }\n", "", "credentials[0].audit: not allowed together with secret"},
-		{"log level warn", "audit: { enabled: true, retention: x }\n", auditCreds, "log: { level: warn }\n", "audit.enabled: needs log.level"},
-		{"log level debug", "audit: { enabled: true, retention: x }\n", auditCreds, "log: { level: debug }\n", ""},
-		{"unknown key", "audit: { enabled: true, retention: x, path: /x }\n", auditCreds, "", "field path not found"},
+		{"log level warn", "audit: { enabled: true }\n", auditCreds, "log: { level: warn }\n", "audit.enabled: needs log.level"},
+		{"log level debug", "audit: { enabled: true }\n", auditCreds, "log: { level: debug }\n", ""},
+		{"unknown key", "audit: { enabled: true, path: /x }\n", auditCreds, "", "field path not found"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,11 +46,11 @@ func TestAuditValidation(t *testing.T) {
 }
 
 func TestAuditAccessors(t *testing.T) {
-	cfg, err := Parse([]byte(auditYAML("audit: { enabled: true, retention: \"  12 months \" }\n", auditCreds, "")), ".")
+	cfg, err := Parse([]byte(auditYAML("audit: { enabled: true }\n", auditCreds, "")), ".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Audit.Enabled || cfg.Audit.Retention != "12 months" {
+	if !cfg.Audit.Enabled {
 		t.Errorf("Audit = %+v", cfg.Audit)
 	}
 	up := cfg.Upstreams[0]
@@ -84,7 +76,7 @@ func TestExampleConfigAuditBlock(t *testing.T) {
 	s := string(raw)
 	for _, r := range [][2]string{
 		{"token_keys_file: /run/credentials/tn-mcp-proxy.service/keys", "token_keys_file: keys"},
-		{"# audit:\n#   enabled: true\n#   retention: \"12 months\"\n", "audit:\n  enabled: true\n  retention: \"12 months\"\n"},
+		{"# audit:\n#   enabled: true\n", "audit:\n  enabled: true\n"},
 		{"      - { header: X-TN-API-Key,    label: API key }\n", "      - { header: X-TN-API-Key, label: API key, audit: true }\n"},
 	} {
 		if !strings.Contains(s, r[0]) {
@@ -100,7 +92,7 @@ func TestExampleConfigAuditBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Audit.Enabled || cfg.Audit.Retention != "12 months" {
+	if !cfg.Audit.Enabled {
 		t.Errorf("Audit = %+v", cfg.Audit)
 	}
 	if got := labelTexts(cfg.Upstreams[0].AuditedLabels("en")); !slices.Equal(got, []string{"API key"}) {

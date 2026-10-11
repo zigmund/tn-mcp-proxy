@@ -59,7 +59,7 @@ listen: 127.0.0.1:0
 public_url: %s
 secrets:
   token_keys: ["`+testKey("e2e-audit")+`"]
-audit: { enabled: true, retention: "12 months" }
+audit: { enabled: true }
 oauth:
   allowed_redirect_uris: ["%s"]
 upstreams:

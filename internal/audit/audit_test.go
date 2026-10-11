@@ -22,7 +22,7 @@ var testUp = config.Upstream{
 }
 
 func enabled() *config.Config {
-	return &config.Config{Audit: config.Audit{Enabled: true, Retention: "x"}}
+	return &config.Config{Audit: config.Audit{Enabled: true}}
 }
 
 func TestNilLoggerIsDisabled(t *testing.T) {

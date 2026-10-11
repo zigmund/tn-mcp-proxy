@@ -6,7 +6,7 @@ This service connects your AI assistant to your Tradernet account. By continuing
 
 3. The operator is not affiliated with, endorsed by or acting for the broker or Tradernet.
 
-4. The server logs the time and your IP address for each request, the tools called, and the values listed under "What this server logs" on this page. Apart from that, it does not log or store any credential values. Logs are kept for [RETENTION, for example 12 months].
+4. The server logs the time and your IP address for each request, the tools called, and the values listed under "What this server logs" on this page. Apart from that, it does not log or store any credential values. The operator keeps these logs.
 
 5. To stop, revoke or rotate your API key and, if you entered a SID, end that session in Tradernet: this cuts off any access made with them. You can also ask the operator: [CONTACT, for example ops@example.org].
 

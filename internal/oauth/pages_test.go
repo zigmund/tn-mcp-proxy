@@ -21,8 +21,8 @@ func pageBody(t *testing.T, e *azEnv) string {
 	return rec.Body.String()
 }
 
-func enableAuditPage(e *azEnv, retention string) {
-	e.srv.cfg.Audit = config.Audit{Enabled: true, Retention: retention}
+func enableAuditPage(e *azEnv) {
+	e.srv.cfg.Audit = config.Audit{Enabled: true}
 	e.srv.audit = audit.New(e.srv.log, e.srv.cfg)
 }
 
@@ -63,11 +63,11 @@ func TestPageEmptyClientName(t *testing.T) {
 
 func TestPageAuditDisclosure(t *testing.T) {
 	e := newAZ(t, auditUpstream())
-	enableAuditPage(e, "12 months")
+	enableAuditPage(e)
 	body := pageBody(t, e)
 	for _, want := range []string{
 		"What this server logs", "Time of each request", "Your IP address", "<li>Your User</li>", "Tools called",
-		"Logs are kept for 12 months.",
+		"These records are kept by the server.",
 		"Never logged or stored:", `<span class="chip">API key</span>`, `<span class="chip">Extra</span>`,
 		en("hint.audit"),
 	} {
@@ -84,7 +84,7 @@ func TestPageAuditDisclosure(t *testing.T) {
 
 func TestPageAuditWithoutAuditedCredentials(t *testing.T) {
 	e := newAZ(t) // no credential is audited
-	enableAuditPage(e, "30 days")
+	enableAuditPage(e)
 	body := pageBody(t, e)
 	if !strings.Contains(body, "What this server logs") || !strings.Contains(body, "Your IP address") || strings.Count(body, "<li>Your ") != 1 {
 		t.Errorf("panel must list time, IP and tools only:\n%s", body)
@@ -194,7 +194,7 @@ func TestPageEscaping(t *testing.T) {
 		},
 	}
 	e := newAZ(t, up)
-	e.srv.cfg.Audit = config.Audit{Enabled: true, Retention: `<b>12</b> months & "more"`}
+	e.srv.cfg.Audit = config.Audit{Enabled: true}
 	e.srv.audit = audit.New(e.srv.log, e.srv.cfg)
 	e.srv.cfg.OAuth.Page = config.Page{
 		Contact: `https://x.example/"><script>alert(1)</script>`,
@@ -202,13 +202,13 @@ func TestPageEscaping(t *testing.T) {
 	}
 	body := pageBody(t, e)
 	for _, bad := range []string{
-		"<script", "<i>a</i>", "<u>b</u>", "<s>c</s>", "<b>12</b>", "<img", `"><script`, "onerror=alert(3)>",
+		"<script", "<i>a</i>", "<u>b</u>", "<s>c</s>", "<img", `"><script`, "onerror=alert(3)>",
 	} {
 		if strings.Contains(body, bad) {
 			t.Errorf("page contains raw %q:\n%s", bad, body)
 		}
 	}
-	for _, want := range []string{"&lt;i&gt;a&lt;/i&gt;", "&lt;u&gt;b&lt;/u&gt;", "&lt;b&gt;12&lt;/b&gt; months &amp;", "&lt;script&gt;alert(2)"} {
+	for _, want := range []string{"&lt;i&gt;a&lt;/i&gt;", "&lt;u&gt;b&lt;/u&gt;", "&lt;script&gt;alert(2)"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks escaped %q", want)
 		}
@@ -235,7 +235,7 @@ func TestPageHintCopy(t *testing.T) {
 		t.Errorf("plain hint wrong:\n%s", b)
 	}
 	logged := newAZ(t, auditUpstream())
-	enableAuditPage(logged, "1 year")
+	enableAuditPage(logged)
 	b := pageBody(t, logged)
 	if strings.Contains(b, "not stored by this server") {
 		t.Error("audit hint must not claim that nothing is stored")

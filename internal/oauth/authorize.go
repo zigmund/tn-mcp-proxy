@@ -121,7 +121,6 @@ type formField struct {
 
 // auditNotice is the "What this server logs" panel; nil when audit is off.
 type auditNotice struct {
-	Retention   slot
 	Logged      []slot            // one sentence per audited credential
 	NeverLogged []config.LangText // labels of the credentials the server never logs
 }
@@ -600,7 +599,6 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formAr
 	}
 	if s.cfg.Audit.Enabled {
 		an := &auditNotice{
-			Retention:   l.Slot("audit.retention", s.cfg.Audit.RetentionIn(l.Lang())),
 			NeverLogged: nonPageLang(l, up.NeverLoggedLabels(l.Lang())),
 		}
 		for _, lt := range up.AuditedLabels(l.Lang()) {

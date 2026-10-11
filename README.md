@@ -199,13 +199,20 @@ proxy yourself or use one whose operator you trust.
 
 ## Connect claude.ai
 
-1. In claude.ai: Settings -> Connectors -> Add custom connector.
-2. URL: `public_url` + the upstream `path`, e.g. `https://mcp.example.com/tn/mcp`.
+Menus change; if these differ, follow Claude's guide to
+[custom connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+
+1. Customize -> Connectors -> **+ Add** -> **Add custom connector** (on Team and
+   Enterprise plans an owner adds it for the organization; see the guide).
+2. Name it after the upstream (e.g. `Tradernet`) and enter `public_url` + the
+   upstream `path`, e.g. `https://mcp.example.com/tn/mcp`. Click Continue twice
+   (the OAuth settings are detected), then Add.
 3. Connect. The browser opens the proxy's authorization page for the upstream:
    enter your Tradernet API key, API secret and (if you use one) SID.
 4. Submit. With `validate` configured, the proxy first checks the keys with
    Tradernet and shows the form again if they are rejected. Otherwise claude.ai
    receives tokens and the connector is ready.
+5. In a chat, turn it on with **+** (lower left) -> Connectors.
 
 Your credentials are not stored on the server. They are sealed (encrypted and
 authenticated) inside the tokens that claude.ai holds, and are decrypted only
@@ -222,19 +229,38 @@ An upstream that does answer `401` is handled without any configuration.
 
 ## Connect ChatGPT
 
-The UI path below may change; follow the current ChatGPT documentation if it differs.
+Menus change; if these differ, follow OpenAI's guide to
+[adding a custom MCP server](https://developers.openai.com/api/docs/guides/custom-mcp-server).
 
-1. In ChatGPT: Settings -> Apps & Connectors -> Advanced -> enable Developer mode.
-2. Create a connector (custom app) with the MCP server URL: `public_url` + the
-   upstream `path`, e.g. `https://mcp.example.com/tn/mcp`. Choose OAuth as the
-   authentication method.
+1. On the web, open <https://chatgpt.com/plugins> -> **Add** ->
+   **Add custom MCP server**.
+2. Name it after the upstream (e.g. `Tradernet`), enter the server URL
+   (`public_url` + the upstream `path`) and choose OAuth. Accept the risk
+   warning, select **Create as a plugin**, then install the plugin.
 3. Connect. The browser opens the same authorization page: enter your upstream
    credentials and submit.
+4. In a chat, type `@` and pick the plugin. Write actions (placing an order, for
+   example) ask for your confirmation by default.
 
 ChatGPT registers itself through dynamic client registration and uses the stable
 redirect URI `https://chatgpt.com/connector_platform_oauth_redirect`, which is
 allowed by default and relies on the RFC 9207 `iss` parameter the proxy
 returns. Credentials are handled as described above.
+
+## Using it
+
+Tell the assistant once to use the connector for account questions, so it does
+not answer from general knowledge: "Remember: when I ask about my portfolio,
+account, trades or quotes, use Tradernet." This needs memory turned on; without
+it, put the same sentence in the personal preferences in Claude's settings, or
+in ChatGPT's Settings -> Personalization -> Custom instructions. Then ask, for
+example:
+
+- "Show my portfolio."
+- "What are my open orders?"
+- "Show the quote and latest news for AAPL."
+- "Place a limit order to buy 10 AAPL at 180, but show me what you will send
+  first."
 
 ## Key rotation
 

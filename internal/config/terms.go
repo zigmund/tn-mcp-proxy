@@ -16,8 +16,6 @@ import (
 const (
 	// MaxTermsTextLen is the largest terms text file, in bytes.
 	MaxTermsTextLen = 32 << 10
-	// MaxTermsVersionLen is the longest terms version, in characters.
-	MaxTermsVersionLen = 32
 	// MaxTermsURLLen is the longest full-text URL, in bytes.
 	MaxTermsURLLen = 512
 )
@@ -26,9 +24,6 @@ const (
 // page before a code is issued. The texts are plain: they are HTML-escaped on
 // output and never interpreted.
 type Terms struct {
-	// Version identifies the text that is accepted; it is shown on the page and
-	// written to the audit log. Required.
-	Version string `yaml:"version"`
 	// Text maps a language code to the path of a plain-text file; paragraphs
 	// are separated by blank lines. It must have an "en" entry. The files are
 	// read when the config is loaded.
@@ -44,7 +39,6 @@ type Terms struct {
 
 // TermsView is the terms to render for one requested language.
 type TermsView struct {
-	Version string
 	// Paragraphs is the text, split on blank lines, in TextLang.
 	Paragraphs []string
 	TextLang   string
@@ -61,14 +55,6 @@ func (t *Terms) validate() []error {
 	}
 	var errs []error
 	const f = "oauth.page.terms"
-	switch v := t.Version; {
-	case v == "":
-		errs = append(errs, errors.New(f+".version: required when "+f+" is set"))
-	case len([]rune(v)) > MaxTermsVersionLen:
-		errs = append(errs, fmt.Errorf("%s.version: longer than %d characters", f, MaxTermsVersionLen))
-	case badText(v, false):
-		errs = append(errs, errors.New(f+".version: must be printable text without control or format characters"))
-	}
 	if len(t.Text) == 0 {
 		errs = append(errs, errors.New(f+".text: required when "+f+" is set"))
 	}
@@ -109,12 +95,11 @@ func (t *Terms) validate() []error {
 	return errs
 }
 
-// normalize trims the version and the URLs.
+// normalize trims the texts' paths and the URLs.
 func (t *Terms) normalize() {
 	if t == nil {
 		return
 	}
-	t.Version = strings.TrimSpace(t.Version)
 	for l, p := range t.Text {
 		t.Text[l] = strings.TrimSpace(p)
 	}
@@ -231,7 +216,6 @@ func (p Page) TermsFor(lang string) (v TermsView, ok bool) {
 	body := lookupLang(t.Body, lang)
 	u := lookupLang(t.URL, lang)
 	return TermsView{
-		Version:    t.Version,
 		Paragraphs: splitParagraphs(body.Text),
 		TextLang:   body.Lang,
 		URL:        u.Text,

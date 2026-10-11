@@ -24,7 +24,7 @@ var catalogKK = map[string]string{
 	"notice.heading": "Оператор хабарламасы",
 	"notice.contact": "Байланыс:",
 
-	"terms.summary":      "Пайдалану шарттары (%[1]s нұсқасы)",
+	"terms.summary":      "Пайдалану шарттары",
 	"terms.region_label": "Пайдалану шарттарының мәтіні",
 	"terms.full_text":    "Толық мәтін",
 	"terms.accept":       "Мен пайдалану шарттарымен таныстым және қабылдаймын",

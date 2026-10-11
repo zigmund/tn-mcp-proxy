@@ -23,7 +23,7 @@ var catalogRU = map[string]string{
 	"notice.heading": "Сообщение от оператора",
 	"notice.contact": "Контакт:",
 
-	"terms.summary":      "Условия использования (версия %[1]s)",
+	"terms.summary":      "Условия использования",
 	"terms.region_label": "Текст условий использования",
 	"terms.full_text":    "Полный текст",
 	"terms.accept":       "Я прочитал(а) и принимаю условия использования",

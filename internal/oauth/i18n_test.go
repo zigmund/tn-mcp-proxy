@@ -370,9 +370,8 @@ func fullI18nEnv(t *testing.T) *azEnv {
 		Contact: "mailto:ops@example.org",
 		Notice:  map[string]string{"en": "Free service.\n\nAs is.", "ru": "Бесплатный сервис.\n\nКак есть."},
 		Terms: &config.Terms{
-			Version: "2026-10-10",
-			Body:    map[string]string{"en": "Terms one.\n\nTerms two.", "ru": "Условия раз.\n\nУсловия два."},
-			URL:     map[string]string{"en": "https://example.org/terms", "ru": "https://example.org/ru"},
+			Body: map[string]string{"en": "Terms one.\n\nTerms two.", "ru": "Условия раз.\n\nУсловия два."},
+			URL:  map[string]string{"en": "https://example.org/terms", "ru": "https://example.org/ru"},
 		},
 	}
 	return e
@@ -486,9 +485,8 @@ func TestPerLanguageLabelInBanner(t *testing.T) {
 
 func setTerms(e *azEnv) {
 	e.srv.cfg.OAuth.Page.Terms = &config.Terms{
-		Version: "2026-10-10",
-		Body:    map[string]string{"en": "Free.\n\nAs is.", "ru": "Бесплатно.\n\nКак есть."},
-		URL:     map[string]string{"en": "https://example.org/terms"},
+		Body: map[string]string{"en": "Free.\n\nAs is.", "ru": "Бесплатно.\n\nКак есть."},
+		URL:  map[string]string{"en": "https://example.org/terms"},
 	}
 }
 
@@ -501,7 +499,7 @@ func TestTermsRendering(t *testing.T) {
 	b := pageBody(t, e)
 	for _, want := range []string{
 		`<details class="terms">`,
-		`<summary>Terms of use (version 2026-10-10)</summary>`,
+		`<summary>Terms of use</summary>`,
 		`role="region" aria-label="Terms of use text"`,
 		`<p>Free.</p>`, `<p>As is.</p>`,
 		`<p class="full"><a href="https://example.org/terms" rel="noopener">Full text</a></p>`,
@@ -533,17 +531,16 @@ func TestTermsRendering(t *testing.T) {
 func TestTermsEscaping(t *testing.T) {
 	e := newAZ(t)
 	e.srv.cfg.OAuth.Page.Terms = &config.Terms{
-		Version: `<i>v</i>&"1`,
-		Body:    map[string]string{"en": "<script>alert(1)</script>\n\n<img src=x onerror=alert(2)> & \"q\""},
-		URL:     map[string]string{"en": `https://example.org/"><script>alert(3)</script>`},
+		Body: map[string]string{"en": "<script>alert(1)</script>\n\n<img src=x onerror=alert(2)> & \"q\""},
+		URL:  map[string]string{"en": `https://example.org/"><script>alert(3)</script>`},
 	}
 	b := pageBody(t, e)
-	for _, bad := range []string{"<script", "<img", "<i>v</i>", `"><script`, "onerror=alert(2)>"} {
+	for _, bad := range []string{"<script", "<img", `"><script`, "onerror=alert(2)>"} {
 		if strings.Contains(b, bad) {
 			t.Errorf("page contains raw %q:\n%s", bad, b)
 		}
 	}
-	for _, want := range []string{"&lt;script&gt;alert(1)", "&lt;img src=x", "&lt;i&gt;v&lt;/i&gt;"} {
+	for _, want := range []string{"&lt;script&gt;alert(1)", "&lt;img src=x"} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks escaped %q", want)
 		}
@@ -666,7 +663,7 @@ func TestAuditRecordLangAndTerms(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("%d records", len(recs))
 	}
-	if recs[0]["terms_version"] != "2026-10-10" || recs[0]["lang"] != "ru" {
+	if _, ok := recs[0]["terms_version"]; ok || recs[0]["terms_lang"] != "ru" || recs[0]["lang"] != "ru" {
 		t.Errorf("record = %v", recs[0])
 	}
 
@@ -681,45 +678,25 @@ func TestAuditRecordLangAndTerms(t *testing.T) {
 	}
 }
 
-// A form rendered under one terms version is not accepted under another: the
-// submit re-renders with the current terms and a form bound to them.
-func TestTermsVersionBoundToForm(t *testing.T) {
-	e := newAZ(t, auditUpstream())
-	buf := enableAudit(e.srv, true)
+// Only the exact value "on" accepts the terms; anything else is refused.
+func TestTermsAcceptanceValue(t *testing.T) {
+	e := newAZ(t)
 	setTerms(e)
 	sealed := hidden(t, e.get(e.query(nil)).Body.String())
-
-	e.srv.cfg.OAuth.Page.Terms.Version = "2027-01-01" // config changed and restarted
-	f := goodForm(sealed)
-	f.Set(acceptTermsField, "on")
-	rec := e.post(f)
-	mustPage(t, rec, http.StatusBadRequest)
-	b := rec.Body.String()
-	for _, want := range []string{en(msgTermsRequired), "Terms of use (version 2027-01-01)", `class="check bad"`} {
-		if !strings.Contains(b, want) {
-			t.Errorf("re-render lacks %q", want)
+	for _, v := range []string{"", "ON", "true", "1", "yes", "off", "on "} {
+		f := goodForm(sealed)
+		if v != "" {
+			f.Set(acceptTermsField, v)
+		}
+		rec := e.post(f)
+		mustPage(t, rec, http.StatusBadRequest)
+		if b := rec.Body.String(); !strings.Contains(b, en(msgTermsRequired)) || !strings.Contains(b, `class="check bad"`) || !strings.Contains(b, `aria-invalid="true"`) {
+			t.Errorf("value %q: terms error missing:\n%s", v, b)
 		}
 	}
-	if len(buf.audits(t, "authorize")) != 0 {
-		t.Fatal("authorize record for a stale form")
-	}
-
-	// The re-rendered form carries the new binding and now succeeds.
-	f2 := goodForm(hidden(t, b))
-	f2.Set(acceptTermsField, "on")
-	mustSeeOther(t, e.post(f2))
-	r := buf.audits(t, "authorize")[0]
-	if r["terms_version"] != "2027-01-01" || r["terms_lang"] != "en" {
-		t.Errorf("record = %v", r)
-	}
-
-	// A form rendered before terms existed is stale too.
-	e2 := newAZ(t)
-	s2 := hidden(t, e2.get(e2.query(nil)).Body.String())
-	setTerms(e2)
-	f3 := goodForm(s2)
-	f3.Set(acceptTermsField, "on")
-	mustPage(t, e2.post(f3), http.StatusBadRequest)
+	f := goodForm(sealed)
+	f.Set(acceptTermsField, "on")
+	mustSeeOther(t, e.post(f))
 }
 
 func TestAuditTermsLang(t *testing.T) {

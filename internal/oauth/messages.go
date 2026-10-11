@@ -51,7 +51,7 @@ var catalog = map[string]map[string]string{
 	defaultLang: {
 		"lang.nav_label": "Language",
 
-		"terms.summary":      "Terms of use (version %[1]s)",
+		"terms.summary":      "Terms of use",
 		"terms.region_label": "Terms of use text",
 		"terms.full_text":    "Full text",
 		"terms.accept":       "I have read and accept the terms of use",

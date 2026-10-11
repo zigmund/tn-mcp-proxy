@@ -113,16 +113,16 @@ func TestPageNoticeAndContact(t *testing.T) {
 		section bool
 	}{
 		{"none", config.Page{}, nil, []string{"Notice from the operator"}, false},
-		{"notice only", config.Page{Notice: map[string]string{"en": "Free.\n\nAs is."}},
+		{"notice only", config.Page{Notice: "Free.\n\nAs is."},
 			[]string{"<p>Free.</p>", "<p>As is.</p>"}, []string{"Contact:"}, true},
 		{"contact only mailto", config.Page{Contact: "mailto:ops@example.org"},
 			[]string{`<p>Contact: <a href="mailto:ops@example.org">ops@example.org</a></p>`}, nil, true},
 		{"contact only https", config.Page{Contact: "https://example.org/help"},
 			[]string{`<a href="https://example.org/help">https://example.org/help</a>`}, nil, true},
-		{"both", config.Page{Contact: "mailto:ops@example.org", Notice: map[string]string{"en": "Hi."}},
+		{"both", config.Page{Contact: "mailto:ops@example.org", Notice: "Hi."},
 			[]string{"<p>Hi.</p>", "Contact:"}, nil, true},
-		{"other languages ignored", config.Page{Notice: map[string]string{"en": "Hi.", "ru": "Привет."}},
-			[]string{"<p>Hi.</p>"}, []string{"Привет."}, true},
+		{"notice is escaped", config.Page{Notice: "<script>alert(1)</script> & \"q\""},
+			[]string{"<p>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &#34;q&#34;</p>"}, []string{"<script"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -198,7 +198,7 @@ func TestPageEscaping(t *testing.T) {
 	e.srv.audit = audit.New(e.srv.log, e.srv.cfg)
 	e.srv.cfg.OAuth.Page = config.Page{
 		Contact: `https://x.example/"><script>alert(1)</script>`,
-		Notice:  map[string]string{"en": "<script>alert(2)</script>\n\n<img src=x onerror=alert(3)>"},
+		Notice:  "<script>alert(2)</script>\n\n<img src=x onerror=alert(3)>",
 	}
 	body := pageBody(t, e)
 	for _, bad := range []string{

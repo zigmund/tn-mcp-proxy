@@ -292,11 +292,10 @@ reports of the independent security audits are indexed in
   with `audit: true` on the identifying credential) so you can answer "who used
   account X through this IP, and when". See
   [docs/configuration.md](docs/configuration.md#audit-log).
-- The authorize page speaks English, Russian and Kazakh (the user's browser
-  language, or `?lang=`), and can show your own notice and an optional terms of
-  use the user must accept (`oauth.page.terms`, with sample agreements in
-  `deploy/`). See
-  [docs/configuration.md](docs/configuration.md#languages-and-terms-of-use).
+- The authorize page is in English and can show your own notice and an
+  optional terms of use the user must accept (`oauth.page.terms_file`, a text
+  file you write). See
+  [docs/configuration.md](docs/configuration.md#notice-and-terms-of-use).
 - Run a single instance. Single-use authorization codes and refresh-token
   families are tracked in bounded in-memory caches, so several instances would
   not see each other's usage.

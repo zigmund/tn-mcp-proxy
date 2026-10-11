@@ -278,16 +278,12 @@ type Validate struct {
 // Audit makes the audit log (see Audit) record the value, so it is not allowed
 // together with Secret. A credential with neither flag is never logged.
 type Credential struct {
-	Header string `yaml:"header"`
-	Label  string `yaml:"label"`
-	// Labels optionally maps a language code to the label for that language;
-	// it must have an "en" entry, which equals Label (and stands in for it
-	// when Label is omitted).
-	Labels        map[string]string `yaml:"labels"`
-	Secret        bool              `yaml:"secret"`
-	Audit         bool              `yaml:"audit"`
-	Optional      bool              `yaml:"optional"`
-	AllowedValues []string          `yaml:"allowed_values"`
+	Header        string   `yaml:"header"`
+	Label         string   `yaml:"label"`
+	Secret        bool     `yaml:"secret"`
+	Audit         bool     `yaml:"audit"`
+	Optional      bool     `yaml:"optional"`
+	AllowedValues []string `yaml:"allowed_values"`
 }
 
 // MaxCredentialValueLen is the longest credential value (bytes) the authorize
@@ -305,43 +301,39 @@ func (u Upstream) AuditedCredentials() []Credential {
 	return out
 }
 
-// MaxCredentialLabelLen is the longest per-language credential label, in characters.
+// MaxCredentialLabelLen is the longest credential label, in characters.
 const MaxCredentialLabelLen = 128
 
-// LabelIn is the label of cr for lang: the requested language's entry in
-// Labels, else Label (the default, en), else the header name.
-func (cr Credential) LabelIn(lang string) LangText {
-	if t, ok := cr.Labels[lang]; ok {
-		return LangText{Text: t, Lang: lang}
-	}
+// DisplayLabel is the label of cr shown on the authorize page: Label, else the
+// header name (Parse already fills Label that way).
+func (cr Credential) DisplayLabel() string {
 	if cr.Label != "" {
-		return LangText{Text: cr.Label, Lang: DefaultNoticeLang}
+		return cr.Label
 	}
-	return LangText{Text: cr.Header, Lang: DefaultNoticeLang}
+	return cr.Header
 }
 
-// NeverLoggedLabels returns the labels (in lang, falling back to the default
-// label, then the header name) of the credentials whose values the server
-// never writes to its logs: every credential that is not audited, in config
-// order. Secret ones included; none of them is stored either, they only
+// NeverLoggedLabels returns the labels of the credentials whose values the
+// server never writes to its logs: every credential that is not audited, in
+// config order. Secret ones included; none of them is stored either, they only
 // travel in the tokens.
-func (u Upstream) NeverLoggedLabels(lang string) []LangText {
-	var out []LangText
+func (u Upstream) NeverLoggedLabels() []string {
+	var out []string
 	for _, cr := range u.Credentials {
 		if cr.Audit && !cr.Secret {
 			continue
 		}
-		out = append(out, cr.LabelIn(lang))
+		out = append(out, cr.DisplayLabel())
 	}
 	return out
 }
 
-// AuditedLabels returns the labels (as NeverLoggedLabels) of the audited
-// credentials, in config order, for the authorize page.
-func (u Upstream) AuditedLabels(lang string) []LangText {
-	var out []LangText
+// AuditedLabels returns the labels of the audited credentials, in config
+// order, for the authorize page.
+func (u Upstream) AuditedLabels() []string {
+	var out []string
 	for _, cr := range u.AuditedCredentials() {
-		out = append(out, cr.LabelIn(lang))
+		out = append(out, cr.DisplayLabel())
 	}
 	return out
 }
@@ -446,7 +438,7 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	if err := cfg.loadKeys(); err != nil {
 		errs = append(errs, err)
 	}
-	errs = append(errs, cfg.OAuth.Page.Terms.load()...)
+	errs = append(errs, cfg.OAuth.Page.loadTerms()...)
 	errs = append(errs, cfg.validate()...)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("invalid config: %w", errors.Join(errs...))
@@ -468,7 +460,7 @@ func (c *Config) resolvePaths(baseDir string) {
 			*p = filepath.Join(baseDir, *p)
 		}
 	}
-	c.OAuth.Page.Terms.resolvePaths(baseDir)
+	c.OAuth.Page.resolveTermsPath(baseDir)
 }
 
 func (c *Config) applyDefaults() {
@@ -510,12 +502,7 @@ func (c *Config) applyDefaults() {
 		}
 		for j := range u.Credentials {
 			cr := &u.Credentials[j]
-			for l, t := range cr.Labels {
-				cr.Labels[l] = strings.TrimSpace(t)
-			}
-			if cr.Label == "" {
-				cr.Label = cr.Labels[DefaultNoticeLang]
-			}
+			cr.Label = strings.TrimSpace(cr.Label)
 			if cr.Label == "" {
 				cr.Label = cr.Header
 			}
@@ -833,11 +820,11 @@ func (u *Upstream) validate(i int, names, paths map[string]int) []error {
 		if cr.Audit && cr.Secret {
 			add("credentials[%d].audit: not allowed together with secret (a secret is never logged)", j)
 		}
-		errs = append(errs, checkLangMap(langTextRules{
-			Field: fmt.Sprintf("upstreams[%d].credentials[%d].labels", i, j), MaxLen: MaxCredentialLabelLen, Runes: true,
-		}, cr.Labels)...)
-		if en, ok := cr.Labels[DefaultNoticeLang]; ok && cr.Label != en {
-			add("credentials[%d].labels.en: must equal label (or omit label)", j)
+		switch {
+		case utf8.RuneCountInString(cr.Label) > MaxCredentialLabelLen:
+			add("credentials[%d].label: longer than %d characters", j, MaxCredentialLabelLen)
+		case badText(cr.Label, false):
+			add("credentials[%d].label: must be valid UTF-8 printable text without control or format characters", j)
 		}
 		switch {
 		case cr.Header == "":

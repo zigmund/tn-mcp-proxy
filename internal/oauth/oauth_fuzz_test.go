@@ -369,7 +369,7 @@ func FuzzRedirect(f *testing.F) {
 			method, wantStatus = http.MethodPost, http.StatusSeeOther
 		}
 		rec := httptest.NewRecorder()
-		e.srv.redirect(rec, httptest.NewRequest(method, PathAuthorize, nil), newLocale(defaultLang), uri, state, params)
+		e.srv.redirect(rec, httptest.NewRequest(method, PathAuthorize, nil), uri, state, params)
 		if rec.Code != wantStatus {
 			t.Fatalf("status = %d, want %d", rec.Code, wantStatus)
 		}

@@ -193,7 +193,5 @@ func (s *Server) denyToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) denyAuthorize(w http.ResponseWriter, r *http.Request) {
-	// A POST body is not read before the limit is charged, so the language is
-	// the lang query parameter or Accept-Language here.
-	s.writeErrorPage(w, http.StatusTooManyRequests, newLocale(negotiateLang(r, "")), uiMsg(msgTooManyRequests))
+	s.writeErrorPage(w, http.StatusTooManyRequests, uiMsg(msgTooManyRequests))
 }

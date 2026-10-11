@@ -24,7 +24,6 @@ func TestAuditValidation(t *testing.T) {
 		{"enabled", "audit: { enabled: true }\n", auditCreds, "", ""},
 		{"disabled needs nothing", "", auditCreds, "", ""},
 		{"retention removed", "audit: { enabled: true, retention: \"12 months\" }\n", auditCreds, "", "field retention not found"},
-		{"retention_i18n removed", "audit: { enabled: true, retention_i18n: { en: x } }\n", auditCreds, "", "field retention_i18n not found"},
 		{"audit with secret", "audit: { enabled: true }\n",
 			"      - { header: X-TN-API-Key, secret: true, audit: true }\n", "", "credentials[0].audit: not allowed together with secret"},
 		{"audit with secret, audit off", "", "      - { header: X-TN-API-Key, secret: true, audit: true }\n", "", "credentials[0].audit: not allowed together with secret"},
@@ -54,7 +53,7 @@ func TestAuditAccessors(t *testing.T) {
 		t.Errorf("Audit = %+v", cfg.Audit)
 	}
 	up := cfg.Upstreams[0]
-	if got := labelTexts(up.AuditedLabels("en")); !slices.Equal(got, []string{"API key"}) {
+	if got := up.AuditedLabels(); !slices.Equal(got, []string{"API key"}) {
 		t.Errorf("AuditedLabels = %v", got)
 	}
 	if got := up.AuditedCredentials(); len(got) != 1 || got[0].Header != "X-TN-API-Key" {
@@ -62,7 +61,7 @@ func TestAuditAccessors(t *testing.T) {
 	}
 	// Label defaults to the header; a secret is never audited even if built by hand.
 	u := Upstream{Credentials: []Credential{{Header: "X-A", Audit: true}, {Header: "X-B", Audit: true, Secret: true}}}
-	if got := labelTexts(u.AuditedLabels("en")); !slices.Equal(got, []string{"X-A"}) {
+	if got := u.AuditedLabels(); !slices.Equal(got, []string{"X-A"}) {
 		t.Errorf("AuditedLabels(hand-built) = %v", got)
 	}
 }
@@ -95,16 +94,7 @@ func TestExampleConfigAuditBlock(t *testing.T) {
 	if !cfg.Audit.Enabled {
 		t.Errorf("Audit = %+v", cfg.Audit)
 	}
-	if got := labelTexts(cfg.Upstreams[0].AuditedLabels("en")); !slices.Equal(got, []string{"API key"}) {
+	if got := cfg.Upstreams[0].AuditedLabels(); !slices.Equal(got, []string{"API key"}) {
 		t.Errorf("AuditedLabels = %v", got)
 	}
-}
-
-// labelTexts is the text of each label, for assertions.
-func labelTexts(lts []LangText) []string {
-	out := make([]string, len(lts))
-	for i, lt := range lts {
-		out[i] = lt.Text
-	}
-	return out
 }

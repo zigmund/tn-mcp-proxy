@@ -28,8 +28,8 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize_form` | `per_minute: 300`, `burst: 100` | Limit for `GET /oauth/authorize` (rendering the form; each one seals a request, hence a generous but finite limit) |
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on the `POST /oauth/authorize` submissions that are about to get a code. `burst` defaults to `per_minute`; setting `burst` needs `per_minute` too. See [Rate limiting](#rate-limiting) |
 | `oauth.page.contact` | | Optional operator contact on the authorize page: `mailto:` address or `https://` URL, at most 256 bytes, no whitespace, control or Unicode format characters. Shown as a link (the text drops `mailto:`) under "Notice from the operator" |
-| `oauth.page.notice` | | Optional notice on the authorize page: a map of lowercase language code (2 or 3 letters) to plain text, each at most 4 KiB of UTF-8 without control characters other than newline and tab, at most 32 languages. Paragraphs are separated by blank lines. Text is HTML-escaped, never interpreted. When `notice` is set it must contain an `en` entry (config error otherwise); the page shows the entry for its language, else `en`. Unicode format characters (bidi controls, zero-width) are rejected |
-| `oauth.page.terms` | | Optional terms of use the user must accept on the authorize page. Keys `text`, `url`; see [Languages and terms of use](#languages-and-terms-of-use) |
+| `oauth.page.notice` | | Optional notice on the authorize page: plain text of at most 4 KiB of UTF-8 without control characters other than newline and tab. Paragraphs are separated by blank lines. Text is HTML-escaped, never interpreted. Unicode format characters (bidi controls, zero-width) are rejected |
+| `oauth.page.terms_file` | | Optional path of a plain-text file with the terms of use the user must accept on the authorize page (required checkbox). Regular file, at most 32 KiB, UTF-8 without control or format characters (newline and tab are fine); CRLF is normalized; a relative path is resolved against the config file's directory; read at startup. Absent: no terms and no checkbox. See [Notice and terms of use](#notice-and-terms-of-use) |
 | `audit.enabled` | `false` | Opt-in audit log tying client IPs to audited credential values. Needs `log.level` `debug` or `info`. See [Audit log](#audit-log) |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
@@ -84,7 +84,7 @@ Credential fields: `header` (required, valid HTTP header name, unique
 case-insensitively per upstream), `label` (default: header), `secret` (mask
 input), `optional`, `allowed_values` (optional list of accepted values, see
 [Restricting access](#restricting-access)), `audit` (write the value to the
-audit log, see [Audit log](#audit-log); an error together with `secret: true`), `labels` (optional map of language code to the label for that language, at most 128 characters, printable; needs an `en` entry that equals `label`, and `label` may then be omitted; see [Languages and terms of use](#languages-and-terms-of-use)). Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
+audit log, see [Audit log](#audit-log); an error together with `secret: true`). A `label` is at most 128 characters of printable text. Each credential becomes one input on the authorize form; values are trimmed, valid UTF-8, at most 4096 bytes and free of control characters. All values together must also fit the 16 KiB token size budget, else the form answers "The credentials together are too long.".
 
 `validate` fields: `tool` (required, MCP tool called with the entered
 credentials, matches `^[A-Za-z0-9_./-]{1,128}$`, must be read-only),
@@ -425,93 +425,52 @@ the start of the record's `msg`; fields in parentheses):
 | `warn` | `credential check failed` (`upstream`) | Authorize-time check failed with an unclassified error |
 | `info`/`warn` | `tls certificate loaded`, `tls certificate expires soon`, `tls certificate reload failed, ...`, `reloaded`, `reload requested, nothing to reload` | Built-in TLS and SIGHUP |
 
-## Languages and terms of use
+## Notice and terms of use
 
-The authorize and error pages are built in English (`en`, the default and the
-fallback), Russian (`ru`) and Kazakh (`kk`). The switcher at the top of the
-authorize page lists them in that order. The language of a request is, in this
-order:
+The authorize and error pages are in English only; there is no language
+switcher and no language negotiation. Your own texts are shown as you write
+them.
 
-1. a valid `lang` parameter (`en`, `ru` or `kk`; the POST form carries it as a
-   hidden field, so a re-rendered form keeps its language);
-2. the best match of `Accept-Language`: q-values are honoured, a region is
-   ignored (`ru-RU` is `ru`, `kk-KZ` is `kk`), `q=0` excludes a language;
-3. `en`.
+- `oauth.page.notice`: plain text shown under "Notice from the operator";
+  paragraphs are separated by blank lines (see the fields table).
+- `upstreams[].credentials[].label`: the name of a credential on the form and
+  in the audit panel (default: the header name).
 
-Unknown values are ignored. The language only changes what is displayed; it
-never takes part in an authorization decision. Error pages are localized the
-same way (a POST that fails before its body is read, such as a rate-limited
-one, uses the query and `Accept-Language` only). The switcher links are built on
-the server from the validated authorize request (`/oauth/authorize?...&lang=xx`,
-never from the raw query), so they also work after a failed submit. The error
-page has no switcher, because its link could not be rebuilt without echoing the
-raw query.
-
-> [!NOTE]
-> The Kazakh texts (the page and the sample agreement) are machine-written and
-> need review by a native speaker before you rely on them. The sample
-> agreements are samples, not legal advice.
-
-**Operator text per language.** Wherever you set a map of language code to
-text, `en` is required, and the page uses the entry for its language, else
-`en`. A text shown in another language than the page is wrapped in a `lang`
-attribute.
-
-- `oauth.page.notice`: map of language to text (see the fields table).
-- `upstreams[].credentials[].labels`: map of language to label, next to `label`
-  (the English and default label). `en` must equal `label`, or `label` is
-  omitted and taken from `labels.en`.
-
-```yaml
-audit:
-  enabled: true
-upstreams:
-  - credentials:
-      - { header: X-TN-API-Key, label: API key, labels: { en: API key, ru: Ключ API }, audit: true }
-```
-
-**Terms of use.** Optional. When `oauth.page.terms` is set, the form shows a
-collapsible "Terms of use" block (the text, and a "Full text" link when `url`
-is set) and a required checkbox before the Authorize button:
+**Terms of use.** Optional and absent by default, which suits a server you
+run for yourself. When `oauth.page.terms_file` is set, the form shows a
+collapsible "Terms of use" block with the file's text and a required checkbox
+before the Authorize button:
 
 ```yaml
 oauth:
   page:
-    terms:
-      text:                            # language -> file; en required
-        en: /etc/tn-mcp-proxy/terms.en.txt
-        ru: /etc/tn-mcp-proxy/terms.ru.txt
-        kk: /etc/tn-mcp-proxy/terms.kk.txt
-      url:                             # optional; language -> https URL of the full text; en required if set
-        en: https://example.org/terms
+    terms_file: /etc/tn-mcp-proxy/terms.txt
 ```
 
-The files are read when the config is loaded (a relative path is resolved
-against the config file's directory), so a change needs a restart. Each is plain text of at most 32 KiB: valid UTF-8 without
-control or format characters other than newline and tab; CRLF is normalized;
-paragraphs are separated by blank lines. The text is HTML-escaped, never
-interpreted. Errors name the field and never echo the content. When the
-language has no text or URL, the `en` one is shown.
+The file is read when the config is loaded (a relative path is resolved
+against the config file's directory), so a change needs a restart. It must be
+a regular file of at most 32 KiB: valid UTF-8 without control or format
+characters other than newline and tab; CRLF is normalized; paragraphs are
+separated by blank lines. The text is HTML-escaped, never interpreted. Errors
+name the field and never echo the content. Without `terms_file` there is no
+terms block and no checkbox.
 
 A submit without `accept_terms=on` is refused: the form is re-rendered
-(`400`) with a localized error banner and the checkbox marked invalid, keeping
-the non-secret values. The check runs before anything else costs resources (see
+(`400`) with an error banner and the checkbox marked invalid, keeping the
+non-secret values. The check runs before anything else costs resources (see
 [Authorization](architecture.md#authorization)), so a missing checkbox causes no
-upstream call and does not spend the global authorize ceiling. The audit
-`authorize` record carries `terms_lang` and `lang`. Terms are not versioned:
-changing the text applies to the next authorization and does not invalidate
-existing tokens.
+upstream call and does not spend the global authorize ceiling. A refused submit
+writes no audit record. Terms are not versioned: changing the text applies to
+the next authorization and does not invalidate existing tokens.
 
-Sample agreements are in `deploy/terms.example.en.txt`, `.ru.txt` and `.kk.txt`
-and ship in the release archive. They say the service is free and provided "as
-is", that use is at the user's risk including trading losses, that the operator
-is not affiliated with the broker, what is logged and that the operator keeps
-the logs (fill the `[CONTACT]` placeholder; they assume the audit log is on, so
-edit item 4 otherwise, and add a retention period to item 4 if you want to state
-one), how to stop (revoke or rotate the API key, or ask the operator), and that
-the operator may refuse or revoke access. They are
-**samples, not legal advice**: have them reviewed for your jurisdiction. The
-Kazakh sample is machine-written and needs native review.
+**You write the terms yourself;** the repository ships no sample agreement. Use
+plain text with paragraphs separated by blank lines. A typical text covers:
+that the service is free and provided "as is", that use is at the user's own
+risk including trading losses, that you are not affiliated with the broker,
+what is logged and that you keep the logs (and for how long, if you want to
+state it), how to stop (revoke or rotate the API key, or ask you) and how to
+contact you. This is not legal advice: have the text reviewed for your
+jurisdiction.
 
 ## Audit log
 
@@ -546,7 +505,7 @@ as `X-Tn-Api-Key`).
 
 | `event` | Written when | Other fields |
 |---|---|---|
-| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host`, `lang` (the page language), `terms_lang` (when `oauth.page.terms` is set: the language the accepted text was shown in, which can be the `en` fallback) |
+| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host` |
 | `token` | a token pair is issued | `grant_type` (`authorization_code` or `refresh_token`), `client_id`, `family` |
 | `request` | a proxied MCP request ends | `method` (HTTP), `status`, `rpc_method`, `tool`; for a batch `rpc_batch` and `rpc` (`0`, `1`, ... each with `method` and `tool`) |
 

@@ -102,7 +102,7 @@ var catalog = map[string]map[string]string{
 		msgCredInvalid:     "%[1]s contains invalid characters.",
 		msgCredsTooLong:    "The credentials together are too long.",
 		msgCredsRejected:   "%[1]s rejected these credentials. Check them and try again.",
-		msgCredsNotAllowed: "These credentials are not allowed on this server: its operator has restricted access to specific keys.",
+		msgCredsNotAllowed: "These credentials cannot be used on this server: its operator only allows specific keys.",
 		msgCredsNoVerdict:  "Could not verify the credentials with %[1]s right now. Try again later.",
 	},
 }

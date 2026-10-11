@@ -140,7 +140,7 @@ checks the collected values (`Upstream.CredsAllowed`: exact match after the
 form's trimming; each candidate is compared as a SHA-256 digest in constant time
 and the loop does not stop at the first match) after the length and token size
 checks and before the upstream validation call and before sealing. A mismatch
-re-renders the form (`400`) with an explicit "not allowed on this server"
+re-renders the form (`400`) with an explicit "cannot be used on this server"
 message, distinct from the "rejected these credentials" message of a real
 upstream rejection, and the upstream is never contacted for foreign keys. The
 message reveals that an allow-list is in use; that is intended, so an operator

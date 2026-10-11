@@ -6,8 +6,9 @@ tn-mcp-proxy is one Go binary (`cmd/tn-mcp-proxy`) that plays two roles on a
 single listener:
 
 - an OAuth 2.1 authorization server for claude.ai and ChatGPT custom connectors
-  (dynamic client registration, authorization code with PKCE S256, refresh
-  tokens), whose "login" is a form asking for the upstream credentials;
+  and for Claude Code (dynamic client registration, authorization code with
+  PKCE S256, refresh tokens), whose "login" is a form asking for the upstream
+  credentials;
 - the protected resource: one reverse proxy per configured upstream MCP server,
   which opens the bearer token, injects the credentials it carries as request
   headers and streams the request through (SSE included).

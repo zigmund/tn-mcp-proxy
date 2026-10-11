@@ -49,6 +49,7 @@ oauth:
     - https://claude.ai/api/mcp/auth_callback
     - https://claude.com/api/mcp/auth_callback
     - https://chatgpt.com/connector_platform_oauth_redirect
+    # - http://localhost:53682/callback  # Claude Code (claude mcp add --callback-port 53682)
 
   # Optional operator notice, contact and terms of use on the authorize page
   # (plain text, HTML-escaped; the page is in English). contact: mailto: or

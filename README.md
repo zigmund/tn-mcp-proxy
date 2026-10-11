@@ -247,6 +247,42 @@ redirect URI `https://chatgpt.com/connector_platform_oauth_redirect`, which is
 allowed by default and relies on the RFC 9207 `iss` parameter the proxy
 returns. Credentials are handled as described above.
 
+## Connect Claude Code
+
+See Claude Code's guide to
+[connecting MCP servers](https://code.claude.com/docs/en/mcp). Claude Code (the
+CLI) uses OAuth with a loopback redirect URI, `http://localhost:<port>/callback`.
+The port is random by default, but the proxy matches redirect URIs exactly, so
+pick a fixed port (any free one; `53682` here) and use the same number on both
+sides.
+
+1. In the proxy config, add the redirect URI. Setting
+   `oauth.allowed_redirect_uris` replaces the defaults, so keep the claude.ai,
+   claude.com and ChatGPT entries if you still use those clients (see
+   [docs/configuration.md](docs/configuration.md) and the example config):
+
+   ```yaml
+   oauth:
+     allowed_redirect_uris:
+       - https://claude.ai/api/mcp/auth_callback
+       - https://claude.com/api/mcp/auth_callback
+       - https://chatgpt.com/connector_platform_oauth_redirect
+       - http://localhost:53682/callback
+   ```
+
+2. Add the server with the same port, then restart Claude Code (or start a new
+   session):
+
+   ```sh
+   claude mcp add --transport http --callback-port 53682 -s user tradernet https://mcp.example.com/tn/mcp
+   ```
+
+3. Run `/mcp`, pick the server and choose **Authenticate**. The browser opens
+   the proxy's authorization page: enter your upstream credentials (and, if
+   `oauth.session_choices` is configured, pick a session lifetime).
+   `claude mcp get tradernet` shows "Needs authentication" before and
+   "Connected" after.
+
 ## Using it
 
 Tell the assistant once to use the connector for account questions, so it does

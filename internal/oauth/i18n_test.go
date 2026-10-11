@@ -365,10 +365,7 @@ func fullI18nEnv(t *testing.T) *azEnv {
 	up.Credentials[0].Labels = map[string]string{"en": "API key", "ru": "Ключ API", "kk": "API кілті"}
 	up.Credentials[1].Labels = map[string]string{"en": "User", "ru": "Пользователь"} // no kk
 	e := newAZ(t, up)
-	e.srv.cfg.Audit = config.Audit{
-		Enabled: true, Retention: "12 months",
-		RetentionI18n: map[string]string{"en": "12 months", "ru": "12 месяцев"},
-	}
+	e.srv.cfg.Audit = config.Audit{Enabled: true}
 	e.srv.cfg.OAuth.Page = config.Page{
 		Contact: "mailto:ops@example.org",
 		Notice:  map[string]string{"en": "Free service.\n\nAs is.", "ru": "Бесплатный сервис.\n\nКак есть."},
@@ -395,7 +392,7 @@ func TestEveryLanguageRenders(t *testing.T) {
 				if strings.HasPrefix(id, "err.") || strings.HasPrefix(id, "cred.") || id == msgTermsRequired {
 					continue // banners, not part of the plain form
 				}
-				if id == "client.unnamed" || id == "hint.plain" || id == "audit.your" || id == "audit.retention" || id == "page.title" || id == "page.request_tail" ||
+				if id == "client.unnamed" || id == "hint.plain" || id == "audit.your" || id == "page.title" || id == "page.request_tail" ||
 					id == "terms.summary" || id == "error.title" || id == "error.hint" {
 					continue // arguments or other page
 				}
@@ -431,11 +428,11 @@ func TestPerLanguageOperatorText(t *testing.T) {
 		want   []string
 		absent []string
 	}{
-		{"en", []string{"<label for=\"cred_0\">API key</label>", "<li>Your User</li>", "Logs are kept for 12 months.", "<p>Free service.</p>", "Terms one."}, []string{"Ключ API", "12 месяцев"}},
+		{"en", []string{"<label for=\"cred_0\">API key</label>", "<li>Your User</li>", "These records are kept by the server.", "<p>Free service.</p>", "Terms one."}, []string{"Ключ API"}},
 		{"ru", []string{
 			"<label for=\"cred_0\">Ключ API</label>",
 			"<li>Значение «Пользователь»</li>",
-			"Журналы хранятся: 12 месяцев.",
+			"Эти записи хранятся на сервере.",
 			"<p>Бесплатный сервис.</p>",
 			"<p>Условия раз.</p>",
 			`<a href="https://example.org/ru" rel="noopener">Полный текст</a>`,
@@ -446,7 +443,7 @@ func TestPerLanguageOperatorText(t *testing.T) {
 		{"kk", []string{
 			"<label for=\"cred_0\">API кілті</label>",
 			`<li>«<span lang="en">User</span>» мәні</li>`,
-			`Жазбалар мына мерзімде сақталады: <span lang="en">12 months</span>.`,
+			"Бұл жазбалар серверде сақталады.",
 			`<p lang="en">Free service.</p>`,
 			`<div class="terms-body" tabindex="0" role="region" aria-label="Пайдалану шарттарының мәтіні" lang="en">`,
 			`<p>Terms one.</p>`,
@@ -748,10 +745,8 @@ func TestAuditTermsLang(t *testing.T) {
 // Every Slot message contains its argument exactly once, in every language.
 func TestSlotMessagesUseArgumentOnce(t *testing.T) {
 	for lang, msgs := range catalog {
-		for _, id := range []string{"audit.your", "audit.retention"} {
-			if n := strings.Count(msgs[id], "%[1]s"); n != 1 {
-				t.Errorf("%s/%s has %d arguments: %q", lang, id, n, msgs[id])
-			}
+		if n := strings.Count(msgs["audit.your"], "%[1]s"); n != 1 {
+			t.Errorf("%s/audit.your has %d arguments: %q", lang, n, msgs["audit.your"])
 		}
 	}
 	// A translation that broke the rule degrades to the unsplit text.

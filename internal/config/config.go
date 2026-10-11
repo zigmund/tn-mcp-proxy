@@ -142,48 +142,9 @@ type Log struct {
 // Audit configures the opt-in audit log: info-level records ("audit" with an
 // event field) that tie a client IP to the credentials marked audit: true, so
 // an operator can answer "who used account X through this server, and when".
-// The proxy never enforces Retention: it is the retention the operator states
-// for the log files, which log rotation applies.
+// The proxy never deletes records: log rotation is the operator's.
 type Audit struct {
 	Enabled bool `yaml:"enabled"`
-	// Retention is short free text such as "12 months", in the default
-	// language (en). Required when Enabled, unless retention_i18n has "en".
-	Retention string `yaml:"retention"`
-	// RetentionI18n optionally maps a language code to the retention text for
-	// that language. It must have an "en" entry, which equals Retention (and
-	// stands in for it when Retention is omitted).
-	RetentionI18n map[string]string `yaml:"retention_i18n"`
-}
-
-// RetentionIn is the retention text for lang: the requested language, else en.
-func (a Audit) RetentionIn(lang string) LangText {
-	if t, ok := a.RetentionI18n[lang]; ok {
-		return LangText{Text: t, Lang: lang}
-	}
-	return LangText{Text: a.Retention, Lang: DefaultNoticeLang}
-}
-
-// MaxAuditRetentionLen is the longest audit.retention, in characters.
-const MaxAuditRetentionLen = 64
-
-// validate checks a. Errors are prefixed with the field name.
-func (a Audit) validate() []error {
-	var errs []error
-	switch {
-	case a.Retention == "" && a.Enabled:
-		errs = append(errs, errors.New("audit.retention: required when audit.enabled is true"))
-	case utf8.RuneCountInString(a.Retention) > MaxAuditRetentionLen:
-		errs = append(errs, fmt.Errorf("audit.retention: longer than %d characters", MaxAuditRetentionLen))
-	case strings.IndexFunc(a.Retention, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 || !utf8.ValidString(a.Retention):
-		errs = append(errs, errors.New("audit.retention: must be printable text without control characters"))
-	}
-	errs = append(errs, checkLangMap(langTextRules{
-		Field: "audit.retention_i18n", MaxLen: MaxAuditRetentionLen, Runes: true,
-	}, a.RetentionI18n)...)
-	if en, ok := a.RetentionI18n[DefaultNoticeLang]; ok && a.Retention != en {
-		errs = append(errs, errors.New("audit.retention_i18n.en: must equal audit.retention (or omit audit.retention)"))
-	}
-	return errs
 }
 
 // Secrets holds token encryption keys. Exactly one of TokenKeys and
@@ -522,13 +483,6 @@ func (c *Config) applyDefaults() {
 	if c.Log.Level == "" {
 		c.Log.Level = DefaultLogLevel
 	}
-	c.Audit.Retention = strings.TrimSpace(c.Audit.Retention)
-	for l, t := range c.Audit.RetentionI18n {
-		c.Audit.RetentionI18n[l] = strings.TrimSpace(t)
-	}
-	if en := c.Audit.RetentionI18n[DefaultNoticeLang]; c.Audit.Retention == "" && en != "" {
-		c.Audit.Retention = en
-	}
 	c.OAuth.Page.normalize()
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	if c.Log.Format == "" {
@@ -718,7 +672,6 @@ func (c *Config) validate() []error {
 		add("log.format: %q must be one of json|text", c.Log.Format)
 	}
 
-	errs = append(errs, c.Audit.validate()...)
 	errs = append(errs, c.OAuth.Page.validate()...)
 	if c.Audit.Enabled && (c.Log.Level == "warn" || c.Log.Level == "error") {
 		add("audit.enabled: needs log.level debug or info, audit records are written at info level")

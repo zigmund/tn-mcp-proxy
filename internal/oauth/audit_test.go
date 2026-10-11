@@ -77,7 +77,7 @@ func enableAudit(srv *Server, on bool) *lockedBuf {
 	buf := &lockedBuf{}
 	log := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	srv.log = log
-	srv.cfg.Audit = config.Audit{Enabled: on, Retention: "12 months"}
+	srv.cfg.Audit = config.Audit{Enabled: on}
 	srv.audit = audit.New(log, srv.cfg)
 	return buf
 }

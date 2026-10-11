@@ -40,7 +40,7 @@ const (
 // a fmt format with explicit argument indexes (%[1]s), so a translation can
 // reorder its arguments. Arguments are plain values and the result is plain
 // text: html/template escapes it where it is rendered, so an argument (host,
-// title, retention, label) can never inject markup. Never put HTML in a text.
+// title, label) can never inject markup. Never put HTML in a text.
 //
 // To add a language, add an entry under its lowercase code and list it in
 // pageLangs; a missing id falls back to defaultLang, but a test requires the
@@ -65,13 +65,13 @@ var catalog = map[string]map[string]string{
 		"client.unverified": "self-declared, unverified",
 		"field.optional":    "(optional)",
 
-		"audit.heading":   "What this server logs",
-		"audit.time":      "Time of each request",
-		"audit.ip":        "Your IP address",
-		"audit.your":      "Your %[1]s",
-		"audit.tools":     "Tools called",
-		"audit.retention": "Logs are kept for %[1]s.",
-		"audit.never":     "Never logged or stored:",
+		"audit.heading": "What this server logs",
+		"audit.time":    "Time of each request",
+		"audit.ip":      "Your IP address",
+		"audit.your":    "Your %[1]s",
+		"audit.tools":   "Tools called",
+		"audit.kept":    "These records are kept by the server.",
+		"audit.never":   "Never logged or stored:",
 
 		"notice.heading": "Notice from the operator",
 		"notice.contact": "Contact:",
@@ -154,8 +154,8 @@ func (l locale) Msg(m message) string {
 	return l.T(m.ID, m.Args...)
 }
 
-// slot is a message with one operator-supplied argument (a label, a retention
-// text) that may be written in another language than the page, in which case
+// slot is a message with one operator-supplied argument (a label)
+// that may be written in another language than the page, in which case
 // the template wraps the argument in a lang attribute. Lang is empty when the
 // argument is in the page language, and Text is then the whole sentence.
 type slot struct {

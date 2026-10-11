@@ -29,7 +29,7 @@
 {{range .Logged}}<li>{{template "slot" .}}</li>
 {{end}}<li>{{$.L.T "audit.tools"}}</li>
 </ul>
-<p>{{template "slot" .Retention}}</p>
+<p>{{$.L.T "audit.kept"}}</p>
 {{if .NeverLogged}}<p>{{$.L.T "audit.never"}} {{range .NeverLogged}}<span class="chip"{{if .Lang}} lang="{{.Lang}}"{{end}}>{{.Text}}</span>{{end}}</p>
 {{end}}</section>
 {{end}}{{if or .Notice .ContactHref}}<section class="notice" aria-labelledby="notice-h">

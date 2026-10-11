@@ -26,7 +26,7 @@ func newAuditEnv(t *testing.T, backend http.HandlerFunc, on bool, mutate func(*c
 	recs := &syncBuf{}
 	var al *audit.Logger
 	if on {
-		al = audit.New(slog.New(slog.NewJSONHandler(recs, nil)), &config.Config{Audit: config.Audit{Enabled: true, Retention: "x"}})
+		al = audit.New(slog.New(slog.NewJSONHandler(recs, nil)), &config.Config{Audit: config.Audit{Enabled: true}})
 	}
 	e := newEnvUp(t, backend, func(up *config.Upstream) {
 		up.Credentials[0].Audit = true // X-TN-API-Key; the secret and the SID are not audited
@@ -333,7 +333,7 @@ func TestAuditBatchAlignedInTextFormat(t *testing.T) {
 		t.Fatal(rej)
 	}
 	var buf syncBuf
-	h := &handler{up: testUpstream("http://x"), audit: audit.New(slog.New(slog.NewTextHandler(&buf, nil)), &config.Config{Audit: config.Audit{Enabled: true, Retention: "x"}})}
+	h := &handler{up: testUpstream("http://x"), audit: audit.New(slog.New(slog.NewTextHandler(&buf, nil)), &config.Config{Audit: config.Audit{Enabled: true}})}
 	h.auditRequest(context.Background(), "1.2.3.4", 200, "POST", nil, &info)
 	out := buf.String()
 	for _, want := range []string{`rpc_batch=2`, `rpc.0.method=ping`, `rpc.0.tool=""`, `rpc.1.method=tools/call`, `rpc.1.tool="quotes get"`} {

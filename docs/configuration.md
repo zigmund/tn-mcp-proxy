@@ -31,8 +31,6 @@ Error messages never echo URL or key material.
 | `oauth.page.notice` | | Optional notice on the authorize page: a map of lowercase language code (2 or 3 letters) to plain text, each at most 4 KiB of UTF-8 without control characters other than newline and tab, at most 32 languages. Paragraphs are separated by blank lines. Text is HTML-escaped, never interpreted. When `notice` is set it must contain an `en` entry (config error otherwise); the page shows the entry for its language, else `en`. Unicode format characters (bidi controls, zero-width) are rejected |
 | `oauth.page.terms` | | Optional terms of use the user must accept on the authorize page. Keys `version`, `text`, `url`; see [Languages and terms of use](#languages-and-terms-of-use) |
 | `audit.enabled` | `false` | Opt-in audit log tying client IPs to audited credential values. Needs `log.level` `debug` or `info`. See [Audit log](#audit-log) |
-| `audit.retention` | | Required when `audit.enabled`. Short free text, at most 64 characters, printable, no control characters (for example `12 months`). It states your retention of the audit records. The proxy does not enforce it: your log rotation does |
-| `audit.retention_i18n` | | Optional map of language code to the retention text for that language (same rules as `retention`, per entry). Needs an `en` entry that equals `retention`; `retention` may then be omitted and is taken from it. See [Languages and terms of use](#languages-and-terms-of-use) |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
 | `upstreams[]` | at least one | See below |
@@ -463,15 +461,10 @@ attribute.
 - `upstreams[].credentials[].labels`: map of language to label, next to `label`
   (the English and default label). `en` must equal `label`, or `label` is
   omitted and taken from `labels.en`.
-- `audit.retention_i18n`: map of language to retention text, next to the plain
-  string `audit.retention`, which stays valid on its own. `en` must equal
-  `retention`, or `retention` is omitted and taken from it.
 
 ```yaml
 audit:
   enabled: true
-  retention: "12 months"
-  retention_i18n: { en: "12 months", ru: "12 месяцев", kk: "12 ай" }
 upstreams:
   - credentials:
       - { header: X-TN-API-Key, label: API key, labels: { en: API key, ru: Ключ API }, audit: true }
@@ -515,10 +508,11 @@ does not invalidate existing tokens: it applies to the next authorization.
 Sample agreements are in `deploy/terms.example.en.txt`, `.ru.txt` and `.kk.txt`
 and ship in the release archive. They say the service is free and provided "as
 is", that use is at the user's risk including trading losses, that the operator
-is not affiliated with the broker, what is logged and for how long (fill the
-`[RETENTION]` and `[CONTACT]` placeholders; they assume the audit log is on, so
-edit item 4 otherwise), how to stop (revoke or rotate the API key, or ask the
-operator), and that the operator may refuse or revoke access. They are
+is not affiliated with the broker, what is logged and that the operator keeps
+the logs (fill the `[CONTACT]` placeholder; they assume the audit log is on, so
+edit item 4 otherwise, and add a retention period to item 4 if you want to state
+one), how to stop (revoke or rotate the API key, or ask the operator), and that
+the operator may refuse or revoke access. They are
 **samples, not legal advice**: have them reviewed for your jurisdiction. The
 Kazakh sample is machine-written and needs native review.
 
@@ -531,7 +525,6 @@ answer: it has no credential. The audit log can. It is off by default:
 ```yaml
 audit:
   enabled: true
-  retention: "12 months"     # required; your stated retention, not enforced by the proxy
 upstreams:
   - credentials:
       - { header: X-TN-API-Key, label: API key, audit: true }      # value is logged
@@ -541,8 +534,8 @@ upstreams:
 While `audit.enabled` is true the authorize page always shows a "What this
 server logs" panel before the Authorize button: the time and client IP of each
 request, "Your <label>" for each audited credential, that tools called are
-logged, "Logs are kept for <retention>", and "Never logged or stored:" with the
-labels of every other credential (secret ones and, for example, an optional
+logged, "These records are kept by the server" (no retention period is
+stated), and "Never logged or stored:" with the labels of every other credential (secret ones and, for example, an optional
 SID). It cannot be turned off separately, so a user always sees what is
 recorded. The hint above the button then says that, apart from what the panel
 lists, the server does not log or store any credential values.
@@ -591,8 +584,10 @@ a value cannot add fields or lines. Forms refuse control characters anyway.
 
 **Personal data.** Other people's IPs and API keys are personal data in many
 jurisdictions. You decide how long records are kept and where the server (and
-its logs) are located; set `retention` to what you really do. The proxy never deletes anything: configure log rotation and
-expiry (journald `MaxRetentionSec`, logrotate, your log platform) to match.
+its logs) are located; the proxy never deletes anything. The retention period
+is set by your own log rotation (journald `MaxRetentionSec`, logrotate, your log
+platform), and the page states no period. If you want to state one, put it in
+the terms text.
 
 ## Client IP
 

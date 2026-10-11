@@ -22,3 +22,6 @@ dist/
 
 # Local security audit reports (not published until findings are fixed)
 /.audit/
+
+# Local deploy configs (rsyslog, logrotate, ...)
+/local/

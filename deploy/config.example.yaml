@@ -75,7 +75,7 @@ oauth:
   # The authorize page is available in English (the default and the fallback),
   # Russian and Kazakh. The language comes from ?lang=, else the browser's
   # Accept-Language, else English. Your own texts (notice, terms, credential
-  # labels, audit retention) are shown in the user's language when you provide
+  # labels) are shown in the user's language when you provide
   # it, else in English.
 
   # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
@@ -113,15 +113,12 @@ oauth:
 # on the upstream below, so you can answer "who used account X through this IP,
 # and when". Recommended for a server that is open to anyone's keys. Secret
 # values, tokens, bodies and query strings are never written; "audit: true" is
-# an error together with "secret: true". "retention" is required, at most 64
-# printable characters, and states your retention of these logs; the proxy
-# does NOT enforce it, your log rotation does. Logs of other people's IPs and
-# keys are personal data in many jurisdictions: you decide retention and server
-# location. Needs log.level debug or info. See docs/configuration.md#audit-log
+# an error together with "secret: true". Logs of other people's IPs and keys are
+# personal data in many jurisdictions: you decide how long they are kept (your
+# log rotation, not the proxy) and where the server runs. Needs log.level debug
+# or info. See docs/configuration.md#audit-log
 # audit:
 #   enabled: true
-#   retention: "12 months"
-#   retention_i18n: { en: "12 months", ru: "12 месяцев", kk: "12 ай" }  # optional; en required and equal to retention
 # With it, also set "audit: true" on the identifying credential below:
 #   - { header: X-TN-API-Key, label: API key, audit: true }
 # A credential may carry per-language labels next to "label" (en required and

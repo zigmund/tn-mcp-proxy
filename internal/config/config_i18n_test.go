@@ -194,49 +194,6 @@ func TestLabelLookup(t *testing.T) {
 	}
 }
 
-func TestRetentionI18n(t *testing.T) {
-	const cred = "      - { header: X-A }\n"
-	tests := []struct {
-		name, audit, wantErr string
-	}{
-		{"ok", "audit:\n  enabled: true\n  retention: 12 months\n  retention_i18n: { en: 12 months, ru: 12 месяцев, kk: 12 ай }\n", ""},
-		{"en fills retention", "audit:\n  enabled: true\n  retention_i18n: { en: 12 months, ru: 12 месяцев }\n", ""},
-		{"plain string still works", "audit:\n  enabled: true\n  retention: 12 months\n", ""},
-		{"without en", "audit:\n  enabled: true\n  retention: 12 months\n  retention_i18n: { ru: 12 месяцев }\n", "audit.retention_i18n.en: required"},
-		{"en differs", "audit:\n  enabled: true\n  retention: 6 months\n  retention_i18n: { en: 12 months }\n", "retention_i18n.en: must equal audit.retention"},
-		{"too long", "audit:\n  enabled: true\n  retention: x\n  retention_i18n: { en: x, ru: " + strings.Repeat("я", MaxAuditRetentionLen+1) + " }\n", "audit.retention_i18n.ru: longer than 64 characters"},
-		{"control", "audit:\n  enabled: true\n  retention: x\n  retention_i18n: { en: x, ru: \"a\\nb\" }\n", "audit.retention_i18n.ru: must be valid UTF-8 printable"},
-		{"bad key", "audit:\n  enabled: true\n  retention: x\n  retention_i18n: { en: x, Ru: y }\n", "every key must be a lowercase language code"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Parse([]byte(i18nYAML(tt.audit, cred)), ".")
-			switch {
-			case tt.wantErr == "" && err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
-				t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
-			}
-		})
-	}
-
-	cfg, err := Parse([]byte(i18nYAML("audit:\n  enabled: true\n  retention_i18n: { en: 12 months, ru: 12 месяцев }\n", cred)), ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Audit.Retention != "12 months" {
-		t.Errorf("Retention = %q, want filled from retention_i18n.en", cfg.Audit.Retention)
-	}
-	for _, c := range []struct {
-		lang string
-		want LangText
-	}{{"ru", LangText{"12 месяцев", "ru"}}, {"en", LangText{"12 months", "en"}}, {"kk", LangText{"12 months", "en"}}} {
-		if got := cfg.Audit.RetentionIn(c.lang); got != c.want {
-			t.Errorf("RetentionIn(%q) = %+v, want %+v", c.lang, got, c.want)
-		}
-	}
-}
-
 func TestNoticeIn(t *testing.T) {
 	p := Page{Notice: map[string]string{"en": "e", "ru": "r"}}
 	if got := p.NoticeIn("ru"); got != (LangText{"r", "ru"}) {

@@ -14,7 +14,7 @@ import (
 
 const (
 	rejectedMsg    = "Tradernet rejected these credentials. Check them and try again."
-	notAllowedMsg  = "These credentials are not allowed on this server: its operator has restricted access to specific keys."
+	notAllowedMsg  = "These credentials cannot be used on this server: its operator only allows specific keys."
 	unavailableMsg = "Could not verify the credentials with Tradernet right now. Try again later."
 	upstreamText   = "Error executing tool get_auth_info: Invalid api key provided"
 )

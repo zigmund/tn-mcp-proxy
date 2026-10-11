@@ -345,7 +345,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 		return nil
 	}
 
-	// Allow-list: an explicit "not allowed on this server" message, distinct
+	// Allow-list: an explicit "cannot be used on this server" message, distinct
 	// from an upstream rejection (the upstream was never asked, and the
 	// operator must be able to tell the two apart). It reveals that a list
 	// exists; that is intended. No upstream call for foreign keys.

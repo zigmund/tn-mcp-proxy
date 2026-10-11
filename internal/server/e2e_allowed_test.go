@@ -85,7 +85,7 @@ upstreams:
 	form.Set("cred_0", "someone-elses-key")
 	rec = postForm(t, h, "/oauth/authorize", form)
 	mustStatus(t, rec, http.StatusBadRequest, "foreign key")
-	if body := rec.Body.String(); !strings.Contains(body, "are not allowed on this server") || strings.Contains(body, "rejected these credentials") {
+	if body := rec.Body.String(); !strings.Contains(body, "cannot be used on this server") || strings.Contains(body, "rejected these credentials") {
 		t.Errorf("form lacks the explicit not-allowed message:\n%s", body)
 	}
 	if n, _, _ := up.snapshot(); n != 0 {

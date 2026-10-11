@@ -12,6 +12,11 @@ tn-mcp-proxy does not implement the Tradernet API itself: it fronts Tradernet's
 own [MCP server](https://tradernet.com/tradernet-api/mcp) and forwards MCP
 traffic to it with the user's credential headers attached.
 
+It is also useful for clients that can send headers, such as Claude Code: the
+keys stay off the client machine, which holds only a sealed, expiring token
+instead of them (see [Compared with a direct
+connection](#compared-with-a-direct-connection)).
+
 > [!CAUTION]
 > **A public proxy that accepts any upstream credentials is an open relay from
 > your IP.** Every request to Tradernet leaves from this server's IP address, and
@@ -67,6 +72,51 @@ Who sees what:
 The token is a bearer secret: whoever holds it can use it until it expires (access tokens: `oauth.access_token_ttl`; a refresh chain: its idle expiry or `oauth.max_session_ttl`, or the session length the user picks on the form when `oauth.session_choices` is set, whichever comes first, and nothing is revoked when a connector is disconnected).
 A TLS-terminating reverse proxy in front of tn-mcp-proxy also sees the plain
 keys while you submit the authorization form.
+
+### Compared with a direct connection
+
+Clients that can send headers, such as Claude Code, do not need the proxy to
+connect. Tradernet's own [MCP guide](https://tradernet.com/tradernet-api/mcp)
+has them keep the API key and secret in a plain-text env file that feeds the
+client's MCP config. Going through the proxy changes what the client machine
+holds:
+
+| | Direct (keys in headers) | Through the proxy |
+| --- | --- | --- |
+| On the client machine | API key and secret in plain text | a sealed token (AES-256-GCM) |
+| If it leaks | the keys: full Tradernet API access | the token: every tool the upstream exposes through the proxy, trading included, until it expires; the keys stay hidden |
+| Lifetime | until you change the keys | access token 1h, idle refresh 720h, absolute end 90 days or the user's pick |
+| Kill switch | revoke the keys in Tradernet | revoke the keys in Tradernet, or remove the old token key (all tokens, all users) |
+| Model context | keys stay out, but `auth_by_login` takes login and password, and tools accept `api_key`/`api_secret` | keys are typed on the proxy's page, not in chat; key parameters in tool calls are refused when `forbidden_arguments` is set |
+
+Details behind the table:
+
+- Lifetime: `oauth.access_token_ttl` (1h by default), the sliding idle expiry
+  `oauth.refresh_token_ttl` (720h), and the absolute end `oauth.max_session_ttl`
+  (90 days), or the user's pick when `oauth.session_choices` is set (it can be
+  `unlimited`); see [Fields](docs/configuration.md#fields) and
+  [Session choice](docs/configuration.md#session-choice).
+- Kill switch: the proxy has no per-token revocation. Removing the old token
+  key ends every token and registered client id at once, for all users (see
+  [Key rotation](#key-rotation)). A reused refresh token revokes its refresh
+  chain, but not access tokens already issued; those expire within
+  `oauth.access_token_ttl`. Revoking the keys in Tradernet works in both
+  setups: proxied calls then fail.
+- Model context: `forbidden_arguments` is opt-in (recommended in the warning
+  above). With `[api_key, api_secret]` the proxy refuses key parameters; add
+  `sid` if you use it. It does not stop the `auth_by_login` login and password
+  parameters.
+
+This is a smaller blast radius, not a second factor: the token alone is enough
+to use the access it grants, and the proxy's token keys are only needed to
+extract the Tradernet keys from it. The token is a bearer secret (see above),
+and where the client keeps it depends on the client (for example the macOS
+Keychain for Claude Code). The proxy host, and any TLS-terminating reverse
+proxy in front of it, sees the plain keys, so this trades trust in the client
+machine for trust in the proxy host. With `unlimited` the absolute cap is gone,
+and a stolen chain ends only by idle expiry (`oauth.refresh_token_ttl`), by
+revoking the API key in Tradernet (with `validate`, the re-check then refuses
+the next refresh) or by rotating the token keys.
 
 See [docs/architecture.md](docs/architecture.md) for the details.
 
@@ -331,6 +381,9 @@ The threat model and mechanisms are in
 reports of the independent security audits are indexed in
 [docs/security/](docs/security/README.md).
 
+- For clients that can send headers, the proxy keeps the keys off the client
+  machine; see [Compared with a direct
+  connection](#compared-with-a-direct-connection).
 - No database or stored credentials; tokens are self-contained sealed blobs.
   Anyone with the token keys can decrypt every issued token.
 - The host sees credentials in plaintext on the authorize form: run the proxy

@@ -18,7 +18,9 @@ Error messages never echo URL or key material.
 | `secrets.token_keys_file` | | File with one base64 key per line; `#` comments and blank lines ignored |
 | `oauth.access_token_ttl` | `1h` | Positive duration, at most `24h` (access tokens cannot be revoked, so this is a thief's window) |
 | `oauth.refresh_token_ttl` | `720h` | Positive duration; refresh tokens are single-use (reuse revokes the login's token family) and every refresh restarts this lifetime (sliding expiry), but never beyond `oauth.max_session_ttl` |
-| `oauth.max_session_ttl` | `2160h` (90 days) | Positive duration; absolute lifetime of a login, counted from the code exchange and never extended by refreshing. Once it has passed, the refresh grant fails with `invalid_grant` and the user must reconnect; refresh and access token expiry (and `expires_in`) are capped at the session end. Refresh tokens issued before this setting existed carry no start time: their first refresh after an upgrade starts a fresh window, so existing logins get a full `max_session_ttl` from then on. There is no upper bound |
+| `oauth.max_session_ttl` | `2160h` (90 days) | Positive duration; absolute lifetime of a login, counted from the code exchange and never extended by refreshing. Once it has passed, the refresh grant fails with `invalid_grant` and the user must reconnect; refresh and access token expiry (and `expires_in`) are capped at the session end. Refresh tokens issued before this setting existed carry no start time: their first refresh after an upgrade starts a fresh window, so existing logins get a full `max_session_ttl` from then on. There is no upper bound. With `oauth.session_choices` set the user's choice supersedes it for new logins, and it then only governs refresh tokens that carry no choice (issued before `session_choices` was enabled). If `session_choices` is later removed, logins that carry a choice are clamped to at most `max_session_ttl` from their start at their next refresh, never extended |
+| `oauth.session_choices` | | Optional list of at most 8 session lifetimes the user picks from on the authorize form: each a whole number of hours of at least `1h` (Go duration syntax, so `720h`, not `30d`) or the literal `unlimited`; no duplicates. Unset (the default) keeps the fixed `oauth.max_session_ttl` and shows no choice. See [Session choice](#session-choice) |
+| `oauth.session_default` | first entry of `session_choices` | One of the `session_choices`, pre-selected on the form. An error without `session_choices` |
 | `oauth.code_ttl` | `5m` | Positive duration, at most `10m` (OAuth 2.1); lifetime of an authorization code from submission of the credentials form. Codes are single-use |
 | `oauth.allowed_redirect_uris` | claude.ai and claude.com `/api/mcp/auth_callback`, and ChatGPT `https://chatgpt.com/connector_platform_oauth_redirect` | Absolute https URLs (http only for loopback or with `allow_insecure_http`), no duplicates |
 | `oauth.rate_limit.disabled` | `false` | Turns the in-app rate limiting of the OAuth endpoints off: the per-IP limits and the global authorize ceiling. See [Rate limiting](#rate-limiting) |
@@ -379,6 +381,53 @@ the proxy (there is no revocation endpoint): its refresh chain stays valid until
 the `oauth.refresh_token_ttl` idle expiry or `oauth.max_session_ttl`, whichever
 comes first. Removing the old token key is the way to cut every login off at once.
 
+## Session choice
+
+By default every login lasts at most `oauth.max_session_ttl` and the authorize
+form shows no choice. Set `oauth.session_choices` to let the user decide:
+
+```yaml
+oauth:
+  session_choices: [720h, 2160h, 8760h, unlimited]
+  session_default: 2160h   # optional; the first entry when omitted
+```
+
+The form then shows a "Stay connected for" radio group before the Authorize
+button, with the default pre-selected. Labels are derived from the durations:
+`unlimited` is "Until revoked", multiples of `8760h` read "N year(s)", multiples
+of `24h` "N day(s)" and anything else "N hour(s)". Go durations have no `d`
+unit, so write `720h` for 30 days.
+
+- The choice counts from the code exchange and, like `max_session_ttl`, is never
+  extended by refreshing. It caps refresh token expiry, access token expiry and
+  `expires_in`.
+- `unlimited` removes the absolute cap only. The idle `oauth.refresh_token_ttl`
+  still applies and slides with every refresh, so a connector unused for that
+  long has to reconnect. The proxy has no revocation endpoint (see
+  [Keys](#keys)), so "Until revoked" ends in one of these ways: the user
+  revokes the API key at the upstream, after which proxied calls fail (and,
+  with `validate` configured, the re-check also refuses the next refresh); the
+  idle expiry passes; or the operator rotates the token keys.
+- Lowering or removing choices shortens existing logins at their next refresh,
+  but never lengthens them. A refresh token that carries a choice is clamped to
+  what the current config allows: its end becomes at most the start plus the
+  longest configured finite choice (or `max_session_ttl` when `session_choices`
+  is removed entirely), unless an `unlimited` choice is still configured, in
+  which case it is kept. An `unlimited` login therefore gets that finite end,
+  and a refresh after it is an `invalid_grant`.
+- The submitted value must exactly equal the canonical form of a configured
+  choice (`720h`, `unlimited`; `43200m` is read as `720h` in the config but a
+  form must send `720h`). A missing or unlisted value re-renders the form with
+  `400`, an error banner and the group marked invalid, writes no audit record
+  and costs no upstream call.
+- `oauth.max_session_ttl` keeps its meaning for refresh tokens that carry no
+  choice, so logins that predate `session_choices` keep their old cap and are
+  never promoted to `unlimited`.
+- With `audit.enabled` the `authorize` record gains `session` (the canonical
+  choice) while choices are configured, and `token` records of a login that
+  carries a choice have it too.
+- Self-hosted deployments that leave `session_choices` unset see no change.
+
 ## Logging
 
 The service logs through `log/slog`; `log.level` is the threshold and
@@ -505,8 +554,8 @@ as `X-Tn-Api-Key`).
 
 | `event` | Written when | Other fields |
 |---|---|---|
-| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host` |
-| `token` | a token pair is issued | `grant_type` (`authorization_code` or `refresh_token`), `client_id`, `family` |
+| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host`, `session` (only with `oauth.session_choices`) |
+| `token` | a token pair is issued | `grant_type` (`authorization_code` or `refresh_token`), `client_id`, `family`, `session` (only when the login carries a session choice) |
 | `request` | a proxied MCP request ends | `method` (HTTP), `status`, `rpc_method`, `tool`; for a batch `rpc_batch` and `rpc` (`0`, `1`, ... each with `method` and `tool`) |
 
 `client_id` and `family` are 8 hex characters of a SHA-256, enough to correlate

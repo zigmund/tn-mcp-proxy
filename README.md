@@ -64,7 +64,7 @@ Who sees what:
 | tn-mcp-proxy | in memory, per request; never stored or logged | opens it with keys from your config |
 | Tradernet MCP | in the `X-TN-*` headers, as with a direct call | - |
 
-The token is a bearer secret: whoever holds it can use it until it expires (access tokens: `oauth.access_token_ttl`; a refresh chain: its idle expiry or `oauth.max_session_ttl`, whichever comes first, and nothing is revoked when a connector is disconnected).
+The token is a bearer secret: whoever holds it can use it until it expires (access tokens: `oauth.access_token_ttl`; a refresh chain: its idle expiry or `oauth.max_session_ttl`, or the session length the user picks on the form when `oauth.session_choices` is set, whichever comes first, and nothing is revoked when a connector is disconnected).
 A TLS-terminating reverse proxy in front of tn-mcp-proxy also sees the plain
 keys while you submit the authorization form.
 
@@ -307,7 +307,9 @@ reports of the independent security audits are indexed in
 - Refresh tokens are single-use and rotated on every refresh; presenting an
   already used one revokes its whole chain (the user reconnects). A login also
   has an absolute lifetime, `oauth.max_session_ttl` (default 2160h = 90 days)
-  from the original login, which refreshing never extends. Disconnecting a
+  from the original login, which refreshing never extends (or the length the
+  user picks on the form, when `oauth.session_choices` is set; "until revoked"
+  has no absolute cap, only the idle expiry). Disconnecting a
   connector in claude.ai or ChatGPT revokes nothing on the proxy (there is no
   revocation endpoint): its chain stays valid until its idle expiry or the
   session cap, whichever comes first. To cut everyone off, rotate the token keys

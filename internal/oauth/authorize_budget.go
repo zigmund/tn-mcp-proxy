@@ -23,11 +23,13 @@ func credsFit(up config.Upstream, req authRequest, creds map[string]string) bool
 		tokens.Code{
 			ClientID: req.ClientID, RedirectURI: req.RedirectURI, CodeChallenge: req.CodeChallenge,
 			Upstream: up.Name, Creds: creds, JTI: id, Exp: math.MaxInt64,
+			Session: math.MinInt64,
 		},
 		tokens.Access{Upstream: up.Name, ClientID: req.ClientID, Creds: creds},
 		tokens.Refresh{
 			Upstream: up.Name, ClientID: req.ClientID, Creds: creds, Family: id,
 			Gen: math.MaxInt64, Exp: math.MaxInt64, Start: math.MaxInt64,
+			End: math.MinInt64,
 		},
 	}
 	for _, p := range payloads {

@@ -19,6 +19,10 @@
 <input type="hidden" name="request" value="{{.Request}}">
 {{range .Fields}}<label for="{{.ID}}">{{.Label}}{{if .Optional}} <span class="opt">{{T "field.optional"}}</span>{{end}}</label>
 <input id="{{.ID}}" name="{{.ID}}" type="{{if .Secret}}password{{else}}text{{end}}" autocomplete="off" autocapitalize="off" spellcheck="false"{{if not .Optional}} required{{end}}{{if .Value}} value="{{.Value}}"{{end}}>
+{{end}}{{with .Session}}<fieldset class="choices{{if .Invalid}} bad{{end}}" role="radiogroup"{{if .Invalid}} aria-invalid="true" aria-describedby="err"{{end}}>
+<legend>{{T "session.legend"}}</legend>
+{{range .Options}}<label class="radio"><input type="radio" name="{{$.Session.Field}}" value="{{.Value}}"{{if .Checked}} checked{{end}}><span>{{.Label}}</span></label>
+{{end}}</fieldset>
 {{end}}{{with .Audit}}<section class="panel" aria-labelledby="audit-h">
 <div class="hd"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><h2 id="audit-h">{{T "audit.heading"}}</h2></div>
 <ul>

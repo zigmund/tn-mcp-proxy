@@ -80,6 +80,33 @@ func TestAuthorizeMaxCredentialsRoundTrip(t *testing.T) {
 		t.Fatalf("creds lost: %d", len(code.Creds["X-Extra"]))
 	}
 
+	// The same holds when a session choice is configured: the code and the
+	// refresh token then carry the extra field, which credsFit must have counted.
+	setSessions(e.srv.cfg, t, "", "8760h", "unlimited")
+	rec = e.post(url.Values{
+		requestField: {hidden(t, e.get(e.query(nil)).Body.String())},
+		"cred_0":     {strings.Repeat("a", maxCredLen)}, "cred_1": {strings.Repeat("a", maxCredLen)}, "cred_2": {strings.Repeat("a", n)},
+		sessionField: {"8760h"},
+	})
+	u = mustSeeOther(t, rec)
+	if _, err := seal.OpenAs[tokens.Code](e.srv.sealer, seal.KindCode, u.Query().Get("code")); err != nil {
+		t.Fatalf("code with a session choice at the boundary: %v", err)
+	}
+	rt, err := e.srv.sealer.Seal(seal.KindRefresh, tokens.Refresh{
+		Upstream: "tn", ClientID: e.clientID, Creds: code.Creds, Family: strings.Repeat("x", 22),
+		Gen: math.MaxInt64, Exp: math.MaxInt64, Start: math.MaxInt64, End: math.MinInt64,
+	}, time.Unix(math.MaxInt32, 0))
+	if err != nil || len(rt) > seal.MaxTokenSize {
+		t.Fatalf("refresh with End at the boundary: %d bytes, %v", len(rt), err)
+	}
+	rec = e.post(url.Values{
+		requestField: {hidden(t, e.get(e.query(nil)).Body.String())},
+		"cred_0":     {strings.Repeat("a", maxCredLen)}, "cred_1": {strings.Repeat("a", maxCredLen)}, "cred_2": {strings.Repeat("a", n+1)},
+		sessionField: {"8760h"},
+	})
+	mustPage(t, rec, http.StatusBadRequest)
+	e.srv.cfg.OAuth.Sessions = nil
+
 	// The worst-case tokens derived from the accepted input all seal and open.
 	exp := time.Unix(math.MaxInt32, 0)
 	id := strings.Repeat("x", 22)
@@ -87,7 +114,7 @@ func TestAuthorizeMaxCredentialsRoundTrip(t *testing.T) {
 		seal.KindAccess: tokens.Access{Upstream: "tn", ClientID: e.clientID, Creds: code.Creds},
 		seal.KindRefresh: tokens.Refresh{
 			Upstream: "tn", ClientID: e.clientID, Creds: code.Creds, Family: id,
-			Gen: math.MaxInt64, Exp: math.MaxInt64, Start: math.MaxInt64,
+			Gen: math.MaxInt64, Exp: math.MaxInt64, Start: math.MaxInt64, End: math.MinInt64,
 		},
 	} {
 		tok, err := e.srv.sealer.Seal(kind, payload, exp)

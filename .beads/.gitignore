@@ -75,3 +75,6 @@ bd.db
 # They would override fork protection in .git/info/exclude.
 # Config files (metadata.json, config.yaml) are tracked by git by default
 # since no pattern above ignores them.
+
+# Interaction log (local audit trail; repo is public, never commit)
+interactions.jsonl

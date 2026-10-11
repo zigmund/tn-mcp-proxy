@@ -1,17 +1,17 @@
 <!doctype html>
-<html lang="{{.L.Lang}}">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>{{.L.T "error.title"}}</title>
+<title>{{T "error.title"}}</title>
 <style>{{.CSS}}</style>
 </head>
 <body>
 <main>
-<h1 class="h-err">{{.L.T "error.title"}}</h1>
-<div class="err" role="alert"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg><p>{{.L.Msg .Message}}</p></div>
-<p class="hint">{{.L.T "error.hint"}}</p>
+<h1 class="h-err">{{T "error.title"}}</h1>
+<div class="err" role="alert"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg><p>{{Msg .Message}}</p></div>
+<p class="hint">{{T "error.hint"}}</p>
 </main>
 </body>
 </html>

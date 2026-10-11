@@ -44,37 +44,19 @@ oauth:
     - https://claude.com/api/mcp/auth_callback
     - https://chatgpt.com/connector_platform_oauth_redirect
 
-  # Optional operator notice and contact on the authorize page (plain text,
-  # HTML-escaped). contact: mailto: or https:// URL, shown as a link. notice:
-  # lowercase language code (2-3 letters) -> text of at most 4 KiB; paragraphs
-  # are split on blank lines. An "en" entry is required whenever notice is set;
-  # the page shows its language, else "en". See docs/configuration.md.
+  # Optional operator notice, contact and terms of use on the authorize page
+  # (plain text, HTML-escaped; the page is in English). contact: mailto: or
+  # https:// URL, shown as a link. notice: text of at most 4 KiB; paragraphs
+  # are split on blank lines. terms_file: path of a plain-text file (at most
+  # 32 KiB, UTF-8, read at startup; a relative path is resolved against this
+  # file) shown as "Terms of use"; the user must tick a required checkbox
+  # before Authorize works. Write your own terms (this is not legal advice);
+  # see docs/configuration.md.
   # page:
   #   contact: "mailto:ops@example.org"
-  #   notice:
-  #     en: |
-  #       Free, as is, no guarantees.
-  #     ru: |
-  #       Бесплатно, как есть, без гарантий.
-  #   # Optional terms of use the user must accept (a required checkbox) before
-  #   # the Authorize button works. text: language -> plain-text file (at most
-  #   # 32 KiB, UTF-8, read at startup; relative paths are resolved against
-  #   # this file); "en" is required. url: optional language -> https:// link
-  #   # to the full text, shown as "Full text". The files in deploy/ are
-  #   # samples, not legal advice; the Kazakh texts need native review.
-  #   terms:
-  #     text:
-  #       en: /etc/tn-mcp-proxy/terms.en.txt
-  #       ru: /etc/tn-mcp-proxy/terms.ru.txt
-  #       kk: /etc/tn-mcp-proxy/terms.kk.txt
-  #     url:
-  #       en: https://example.org/terms
-
-  # The authorize page is available in English (the default and the fallback),
-  # Russian and Kazakh. The language comes from ?lang=, else the browser's
-  # Accept-Language, else English. Your own texts (notice, terms, credential
-  # labels) are shown in the user's language when you provide
-  # it, else in English.
+  #   notice: |
+  #     Free, as is, no guarantees.
+  #   terms_file: /etc/tn-mcp-proxy/terms.txt
 
   # Per-IP rate limiting of POST /oauth/register, /oauth/authorize and
   # /oauth/token, and of GET /oauth/authorize (429 + Retry-After). Zero or unset
@@ -119,9 +101,6 @@ oauth:
 #   enabled: true
 # With it, also set "audit: true" on the identifying credential below:
 #   - { header: X-TN-API-Key, label: API key, audit: true }
-# A credential may carry per-language labels next to "label" (en required and
-# equal to label, or label omitted):
-#   - { header: X-TN-API-Key, label: API key, labels: { en: API key, ru: Ключ API } }
 
 upstreams:
   - name: tn                       # [a-z0-9-]+, unique

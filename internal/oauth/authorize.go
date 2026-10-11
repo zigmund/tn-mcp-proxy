@@ -60,8 +60,8 @@ var (
 	//go:embed templates/error.html
 	errorHTML string
 
-	authorizeTmpl = template.Must(template.New("authorize").Parse(authorizeHTML))
-	errorTmpl     = template.Must(template.New("error").Parse(errorHTML))
+	authorizeTmpl = template.Must(template.New("authorize").Funcs(templateFuncs).Parse(authorizeHTML))
+	errorTmpl     = template.Must(template.New("error").Funcs(templateFuncs).Parse(errorHTML))
 
 	// styleSrc is the CSP source for the one inline stylesheet, so the policy
 	// needs neither 'unsafe-inline' nor a per-request nonce.
@@ -90,7 +90,7 @@ type authFailure struct {
 	Status      int // error page status
 	Code        string
 	Description string  // English, for logs and redirect error_description
-	Message     message // what the error page shows, in the page's language
+	Message     message // what the error page shows
 	RedirectURI string
 	State       string
 }
@@ -98,7 +98,7 @@ type authFailure struct {
 // pageFailure is an error page showing the catalog message id.
 func pageFailure(status int, id string, args ...any) *authFailure {
 	m := uiMsg(id, args...)
-	return &authFailure{Status: status, Message: m, Description: newLocale(defaultLang).Msg(m)}
+	return &authFailure{Status: status, Message: m, Description: msgText(m)}
 }
 
 // redirectFailure is only for requests whose client and redirect_uri have
@@ -110,7 +110,6 @@ func redirectFailure(uri, state, code, desc string) *authFailure {
 type formField struct {
 	ID       string
 	Label    string
-	Lang     string // language of Label when it differs from the page's, else empty
 	Secret   bool
 	Optional bool
 	Value    string // never set for secret fields
@@ -118,25 +117,20 @@ type formField struct {
 
 // auditNotice is the "What this server logs" panel; nil when audit is off.
 type auditNotice struct {
-	Logged      []slot            // one sentence per audited credential
-	NeverLogged []config.LangText // labels of the credentials the server never logs
+	Logged      []string // one sentence per audited credential
+	NeverLogged []string // labels of the credentials the server never logs
 }
 
-// termsView is the terms block of the form. A Lang field is set only when that
-// part is not in the page language, so the template can mark it.
+// termsView is the terms block of the form.
 type termsView struct {
 	Paragraphs []string
-	TextLang   string
-	URL        string
-	URLLang    string
 }
 
 // formPage is the data of templates/authorize.html. Every user-visible string
 // not from the operator's config or the request is a catalog message resolved
-// through L, never built into the data.
+// through the T and Msg template functions, never built into the data.
 type formPage struct {
 	CSS           template.CSS
-	L             locale
 	Action        string
 	UpstreamTitle string
 	ClientName    string
@@ -145,9 +139,7 @@ type formPage struct {
 	Fields        []formField
 	Error         message // zero when there is no banner
 	Audit         *auditNotice
-	Notice        []string // operator notice paragraphs, plain text
-	NoticeLang    string   // language of Notice when it differs from the page's
-	LangLinks     []langLink
+	Notice        []string   // operator notice paragraphs, plain text
 	Terms         *termsView // nil when no terms are configured
 	TermsInvalid  bool       // the terms checkbox was not ticked
 	Contact       string     // visible text of the operator contact
@@ -157,7 +149,6 @@ type formPage struct {
 // errorPage is the data of templates/error.html.
 type errorPage struct {
 	CSS     template.CSS
-	L       locale
 	Message message
 }
 
@@ -165,20 +156,19 @@ type errorPage struct {
 // code). Method filtering is done by the mux patterns. No CORS headers are
 // set: this endpoint is only ever navigated to, never fetched cross-origin.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	l := newLocale(negotiateLang(r, ""))
 	if s.sealer == nil {
 		s.log.Error("authorization requested without a sealer")
-		s.writeErrorPage(w, http.StatusInternalServerError, l, uiMsg(msgInternal))
+		s.writeErrorPage(w, http.StatusInternalServerError, uiMsg(msgInternal))
 		return
 	}
 	var fail *authFailure
 	if r.Method == http.MethodPost {
-		fail = s.authorizeSubmit(w, r, &l)
+		fail = s.authorizeSubmit(w, r)
 	} else {
-		fail = s.authorizeForm(w, r, l)
+		fail = s.authorizeForm(w, r)
 	}
 	if fail != nil {
-		s.writeFailure(w, r, l, fail)
+		s.writeFailure(w, r, fail)
 	}
 }
 
@@ -186,7 +176,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 //
 // Order matters: errors found before the client and its redirect_uri are
 // verified go to an error page; only afterwards may errors be redirected.
-func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale) *authFailure {
+func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) *authFailure {
 	q := r.URL.Query()
 	clientID, ok := single(q, "client_id")
 	if !ok || clientID == "" {
@@ -247,7 +237,7 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale)
 		s.log.Error("sealing authorize request", "err", err)
 		return pageFailure(http.StatusInternalServerError, msgInternal)
 	}
-	s.writeForm(w, http.StatusOK, l, formArgs{Client: c, Up: up, Req: req, Sealed: sealed})
+	s.writeForm(w, http.StatusOK, formArgs{Client: c, Up: up, Req: req, Sealed: sealed})
 	return nil
 }
 
@@ -265,10 +255,7 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale)
 // The sealed field binds all request parameters (and expires), so the POST
 // cannot be steered elsewhere. As defence in depth a browser-declared
 // cross-site POST (Sec-Fetch-Site) is refused.
-//
-// l is the page language chosen from the URL and Accept-Language; the form's
-// hidden lang field refines it once the body is parsed. It is display only.
-func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *locale) *authFailure {
+func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFailure {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return pageFailure(http.StatusForbidden, msgCrossSite)
 	}
@@ -280,7 +267,6 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 		}
 		return pageFailure(http.StatusBadRequest, msgFormMalformed)
 	}
-	*l = newLocale(negotiateLang(r, r.PostForm.Get(langParam)))
 	sealed := r.PostForm.Get(requestField)
 	req, err := seal.OpenAs[authRequest](s.sealer, seal.KindAuthRequest, sealed)
 	switch {
@@ -304,9 +290,9 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 		return redirectFailure(req.RedirectURI, req.State, codeInvalidTarget, "unknown resource")
 	}
 
-	creds, values, msg := collectCreds(up, r.PostForm, l.Lang())
+	creds, values, msg := collectCreds(up, r.PostForm)
 	form := func(status int, msg message) {
-		s.writeForm(w, status, *l, formArgs{Client: c, Up: up, Req: req, Sealed: sealed, Values: values, Msg: msg,
+		s.writeForm(w, status, formArgs{Client: c, Up: up, Req: req, Sealed: sealed, Values: values, Msg: msg,
 			TermsInvalid: msg.ID == msgTermsRequired})
 	}
 
@@ -384,16 +370,10 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 		slog.String("upstream", up.Name),
 		slog.String("client_id", shortID(req.ClientID)),
 		slog.String("redirect_host", redirectHost(req.RedirectURI)),
-		slog.String("lang", l.Lang()),
 		s.audit.Creds(up, creds),
 	}
-	if v, ok := s.cfg.OAuth.Page.TermsFor(l.Lang()); ok {
-		// The language of the text the user accepted: a submit without
-		// acceptance never gets here.
-		attrs = append(attrs, slog.String("terms_lang", v.TextLang))
-	}
 	s.audit.Record(r.Context(), audit.EventAuthorize, attrs...)
-	s.redirect(w, r, *l, req.RedirectURI, req.State, url.Values{"code": {code}})
+	s.redirect(w, r, req.RedirectURI, req.State, url.Values{"code": {code}})
 	return nil
 }
 
@@ -481,7 +461,7 @@ func (s *Server) upstreamByName(name string) (config.Upstream, bool) {
 // collectCreds reads the credential fields of up from form. It returns the
 // header->value map, the non-secret values for re-rendering, and a user-facing
 // message when validation fails (the message never contains a value).
-func collectCreds(up config.Upstream, form url.Values, lang string) (creds, values map[string]string, msg message) {
+func collectCreds(up config.Upstream, form url.Values) (creds, values map[string]string, msg message) {
 	creds = make(map[string]string, len(up.Credentials))
 	values = make(map[string]string, len(up.Credentials))
 	for i, cr := range up.Credentials {
@@ -494,11 +474,11 @@ func collectCreds(up config.Upstream, form url.Values, lang string) (creds, valu
 		case v == "" && cr.Optional:
 			continue
 		case v == "":
-			msg = uiMsg(msgCredRequired, credLabel(cr, lang))
+			msg = uiMsg(msgCredRequired, cr.DisplayLabel())
 		case len(v) > maxCredLen:
-			msg = uiMsg(msgCredTooLong, credLabel(cr, lang))
+			msg = uiMsg(msgCredTooLong, cr.DisplayLabel())
 		case !validCredValue(v):
-			msg = uiMsg(msgCredInvalid, credLabel(cr, lang))
+			msg = uiMsg(msgCredInvalid, cr.DisplayLabel())
 		}
 		if msg.ID != "" {
 			return nil, values, msg
@@ -523,9 +503,6 @@ func validCredValue(v string) bool {
 
 func credFieldID(i int) string { return "cred_" + strconv.Itoa(i) }
 
-// credLabel is the label of cr in lang (see config.Credential.LabelIn).
-func credLabel(cr config.Credential, lang string) string { return cr.LabelIn(lang).Text }
-
 // formArgs is what writeForm renders: who asks, for which upstream, the sealed
 // request, the non-secret values to refill, and the banner (zero for none).
 type formArgs struct {
@@ -540,13 +517,12 @@ type formArgs struct {
 }
 
 // writeForm renders the credentials form with the security headers.
-func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formArgs) {
+func (s *Server) writeForm(w http.ResponseWriter, status int, a formArgs) {
 	c, up, req, sealed, values, msg := a.Client, a.Up, a.Req, a.Sealed, a.Values, a.Msg
 	fields := make([]formField, len(up.Credentials))
 	for i, cr := range up.Credentials {
 		id := credFieldID(i)
-		lt := cr.LabelIn(l.Lang())
-		fields[i] = formField{ID: id, Label: lt.Text, Lang: otherLang(l, lt.Lang), Secret: cr.Secret, Optional: cr.Optional, Value: values[id]}
+		fields[i] = formField{ID: id, Label: cr.DisplayLabel(), Secret: cr.Secret, Optional: cr.Optional, Value: values[id]}
 	}
 	title := up.Title
 	if title == "" {
@@ -565,7 +541,6 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formAr
 	page := s.cfg.OAuth.Page
 	data := formPage{
 		CSS:           template.CSS(styleCSS),
-		L:             l,
 		Action:        PathAuthorize,
 		UpstreamTitle: title,
 		ClientName:    c.Name,
@@ -573,29 +548,20 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formAr
 		Request:       sealed,
 		Fields:        fields,
 		Error:         msg,
-		Notice:        page.NoticeParagraphs(l.Lang()),
-		NoticeLang:    otherLang(l, page.NoticeIn(l.Lang()).Lang),
-		LangLinks:     langLinks(l, req, up.ResourceURL(s.cfg.PublicURL)),
+		Notice:        page.NoticeParagraphs(),
 		TermsInvalid:  a.TermsInvalid,
 		Contact:       page.ContactText(),
 		ContactHref:   page.ContactHref(),
 	}
 	if s.cfg.Audit.Enabled {
-		an := &auditNotice{
-			NeverLogged: nonPageLang(l, up.NeverLoggedLabels(l.Lang())),
-		}
-		for _, lt := range up.AuditedLabels(l.Lang()) {
-			an.Logged = append(an.Logged, l.Slot("audit.your", lt))
+		an := &auditNotice{NeverLogged: up.NeverLoggedLabels()}
+		for _, label := range up.AuditedLabels() {
+			an.Logged = append(an.Logged, text("audit.your", label))
 		}
 		data.Audit = an
 	}
-	if v, ok := page.TermsFor(l.Lang()); ok {
-		data.Terms = &termsView{
-			Paragraphs: v.Paragraphs, TextLang: otherLang(l, v.TextLang), URL: v.URL,
-		}
-		if v.URL != "" {
-			data.Terms.URLLang = otherLang(l, v.URLLang)
-		}
+	if page.TermsEnabled() {
+		data.Terms = &termsView{Paragraphs: page.TermsParagraphs()}
 	}
 	s.renderPage(w, status, formAction, authorizeTmpl, data)
 }
@@ -626,33 +592,33 @@ func setPageHeaders(w http.ResponseWriter, formAction string) {
 		"; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'")
 }
 
-func (s *Server) writeErrorPage(w http.ResponseWriter, status int, l locale, m message) {
+func (s *Server) writeErrorPage(w http.ResponseWriter, status int, m message) {
 	s.renderPage(w, status, "'none'", errorTmpl, errorPage{
-		CSS: template.CSS(styleCSS), L: l, Message: m,
+		CSS: template.CSS(styleCSS), Message: m,
 	})
 }
 
 // writeFailure renders an error page or redirects the error to the client.
-func (s *Server) writeFailure(w http.ResponseWriter, r *http.Request, l locale, f *authFailure) {
+func (s *Server) writeFailure(w http.ResponseWriter, r *http.Request, f *authFailure) {
 	if f.RedirectURI == "" {
 		if f.Status >= 500 {
 			s.log.Warn("authorize request failed", "status", f.Status)
 		} else {
 			s.log.Debug("authorize request rejected", "reason", f.Description)
 		}
-		s.writeErrorPage(w, f.Status, l, f.Message)
+		s.writeErrorPage(w, f.Status, f.Message)
 		return
 	}
 	s.log.Debug("authorize request rejected", "error", f.Code, "reason", f.Description)
-	s.redirect(w, r, l, f.RedirectURI, f.State, url.Values{"error": {f.Code}, "error_description": {f.Description}})
+	s.redirect(w, r, f.RedirectURI, f.State, url.Values{"error": {f.Code}, "error_description": {f.Description}})
 }
 
 // redirect sends the user agent to the (already verified) redirect URI with
 // params, state (when present) and the issuer (RFC 9207).
-func (s *Server) redirect(w http.ResponseWriter, r *http.Request, l locale, redirectURI, state string, params url.Values) {
+func (s *Server) redirect(w http.ResponseWriter, r *http.Request, redirectURI, state string, params url.Values) {
 	u, err := url.Parse(redirectURI)
 	if err != nil { // unreachable: it is allowlisted config
-		s.writeErrorPage(w, http.StatusInternalServerError, l, uiMsg(msgInternal))
+		s.writeErrorPage(w, http.StatusInternalServerError, uiMsg(msgInternal))
 		return
 	}
 	q := u.Query()
@@ -708,22 +674,4 @@ func newID() (string, error) {
 		return "", fmt.Errorf("reading random: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
-}
-
-// otherLang is lang when it is not the page's language, else empty: the
-// templates add a lang attribute only for text in another language.
-func otherLang(l locale, lang string) string {
-	if lang == l.Lang() {
-		return ""
-	}
-	return lang
-}
-
-// nonPageLang returns lts with Lang cleared for the ones in the page language.
-func nonPageLang(l locale, lts []config.LangText) []config.LangText {
-	out := make([]config.LangText, len(lts))
-	for i, lt := range lts {
-		out[i] = config.LangText{Text: lt.Text, Lang: otherLang(l, lt.Lang)}
-	}
-	return out
 }

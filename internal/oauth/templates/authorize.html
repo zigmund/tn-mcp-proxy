@@ -38,7 +38,7 @@
 {{end}}{{if .ContactHref}}<p>{{.L.T "notice.contact"}} <a href="{{.ContactHref}}">{{.Contact}}</a></p>
 {{end}}</section>
 {{end}}{{with .Terms}}<details class="terms">
-<summary>{{$.L.T "terms.summary" .Version}}</summary>
+<summary>{{$.L.T "terms.summary"}}</summary>
 <div class="terms-body" tabindex="0" role="region" aria-label="{{$.L.T "terms.region_label"}}"{{if .TextLang}} lang="{{.TextLang}}"{{end}}>
 {{range .Paragraphs}}<p>{{.}}</p>
 {{end}}</div>

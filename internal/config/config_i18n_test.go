@@ -35,30 +35,28 @@ func TestTermsValidation(t *testing.T) {
 		wantErr string
 	}{
 		{"ok", map[string]string{"en.txt": "Free.\n\nAs is.", "ru.txt": termsRU},
-			"      version: \"2026-10-10\"\n      text: { en: en.txt, ru: ru.txt }\n      url: { en: \"https://example.org/terms\" }\n", ""},
-		{"ok text only", map[string]string{"en.txt": "Free."}, "      version: v1\n      text: { en: en.txt }\n", ""},
-		{"no version", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n", "oauth.page.terms.version: required"},
-		{"version too long", map[string]string{"en.txt": "x"}, "      version: " + strings.Repeat("v", MaxTermsVersionLen+1) + "\n      text: { en: en.txt }\n", "version: longer than 32 characters"},
-		{"version control", map[string]string{"en.txt": "x"}, "      version: \"a\\u0007\"\n      text: { en: en.txt }\n", "version: must be printable"},
-		{"no text", nil, "      version: v1\n", "oauth.page.terms.text: required"},
-		{"text without en", map[string]string{"ru.txt": "x"}, "      version: v1\n      text: { ru: ru.txt }\n", "oauth.page.terms.text.en: required"},
-		{"text bad key", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt, EN-us: en.txt }\n", "every key must be a lowercase language code"},
-		{"empty path", nil, "      version: v1\n      text: { en: \"\" }\n", "text.en: file path must not be empty"},
-		{"missing file", nil, "      version: v1\n      text: { en: nope.txt }\n", "oauth.page.terms.text.en: reading file"},
-		{"empty file", map[string]string{"en.txt": " \n\n"}, "      version: v1\n      text: { en: en.txt }\n", "file must not be empty"},
-		{"size max", map[string]string{"en.txt": long}, "      version: v1\n      text: { en: en.txt }\n", ""},
-		{"size cap", map[string]string{"en.txt": long + "a"}, "      version: v1\n      text: { en: en.txt }\n", "file is longer than 32768 bytes"},
-		{"control char", map[string]string{"en.txt": "a\x07b"}, "      version: v1\n      text: { en: en.txt }\n", "without control or format"},
-		{"bare CR", map[string]string{"en.txt": "a\rb"}, "      version: v1\n      text: { en: en.txt }\n", "without control or format"},
-		{"bidi", map[string]string{"en.txt": "a\u202eb"}, "      version: v1\n      text: { en: en.txt }\n", "without control or format"},
-		{"invalid utf8", map[string]string{"en.txt": "a\xffb"}, "      version: v1\n      text: { en: en.txt }\n", "valid UTF-8"},
-		{"tab newline crlf ok", map[string]string{"en.txt": "a\tb\r\n\r\nc"}, "      version: v1\n      text: { en: en.txt }\n", ""},
-		{"url without en", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n      url: { ru: \"https://example.org/ru\" }\n", "oauth.page.terms.url.en: required"},
-		{"url http", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n      url: { en: \"http://example.org\" }\n", "url.en: must be a valid https://"},
-		{"url userinfo", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n      url: { en: \"https://u:p@example.org\" }\n", "url.en: must be a valid https://"},
-		{"url space", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n      url: { en: \"https://example.org/a b\" }\n", "url.en: must not contain whitespace"},
-		{"url too long", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n      url: { en: \"https://example.org/" + strings.Repeat("a", MaxTermsURLLen) + "\" }\n", "url.en: longer than 512"},
-		{"unknown key", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n      title: x\n", "field title not found"},
+			"      text: { en: en.txt, ru: ru.txt }\n      url: { en: \"https://example.org/terms\" }\n", ""},
+		{"ok text only", map[string]string{"en.txt": "Free."}, "      text: { en: en.txt }\n", ""},
+		{"version rejected", map[string]string{"en.txt": "x"}, "      version: v1\n      text: { en: en.txt }\n", "field version not found"},
+		{"no text", nil, "      text: {}\n", "oauth.page.terms.text: required"},
+		{"text without en", map[string]string{"ru.txt": "x"}, "      text: { ru: ru.txt }\n", "oauth.page.terms.text.en: required"},
+		{"text bad key", map[string]string{"en.txt": "x"}, "      text: { en: en.txt, EN-us: en.txt }\n", "every key must be a lowercase language code"},
+		{"empty path", nil, "      text: { en: \"\" }\n", "text.en: file path must not be empty"},
+		{"missing file", nil, "      text: { en: nope.txt }\n", "oauth.page.terms.text.en: reading file"},
+		{"empty file", map[string]string{"en.txt": " \n\n"}, "      text: { en: en.txt }\n", "file must not be empty"},
+		{"size max", map[string]string{"en.txt": long}, "      text: { en: en.txt }\n", ""},
+		{"size cap", map[string]string{"en.txt": long + "a"}, "      text: { en: en.txt }\n", "file is longer than 32768 bytes"},
+		{"control char", map[string]string{"en.txt": "a\x07b"}, "      text: { en: en.txt }\n", "without control or format"},
+		{"bare CR", map[string]string{"en.txt": "a\rb"}, "      text: { en: en.txt }\n", "without control or format"},
+		{"bidi", map[string]string{"en.txt": "a\u202eb"}, "      text: { en: en.txt }\n", "without control or format"},
+		{"invalid utf8", map[string]string{"en.txt": "a\xffb"}, "      text: { en: en.txt }\n", "valid UTF-8"},
+		{"tab newline crlf ok", map[string]string{"en.txt": "a\tb\r\n\r\nc"}, "      text: { en: en.txt }\n", ""},
+		{"url without en", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n      url: { ru: \"https://example.org/ru\" }\n", "oauth.page.terms.url.en: required"},
+		{"url http", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n      url: { en: \"http://example.org\" }\n", "url.en: must be a valid https://"},
+		{"url userinfo", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n      url: { en: \"https://u:p@example.org\" }\n", "url.en: must be a valid https://"},
+		{"url space", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n      url: { en: \"https://example.org/a b\" }\n", "url.en: must not contain whitespace"},
+		{"url too long", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n      url: { en: \"https://example.org/" + strings.Repeat("a", MaxTermsURLLen) + "\" }\n", "url.en: longer than 512"},
+		{"unknown key", map[string]string{"en.txt": "x"}, "      text: { en: en.txt }\n      title: x\n", "field title not found"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,7 +74,7 @@ func TestTermsValidation(t *testing.T) {
 
 func TestTermsErrorDoesNotEchoContent(t *testing.T) {
 	dir := writeFiles(t, map[string]string{"en.txt": "sekret-clause \x07"})
-	_, err := Parse([]byte(termsYAML("      version: v1\n      text: { en: en.txt }\n")), dir)
+	_, err := Parse([]byte(termsYAML("      text: { en: en.txt }\n")), dir)
 	if err == nil || strings.Contains(err.Error(), "sekret-clause") {
 		t.Fatalf("err = %v", err)
 	}
@@ -84,7 +82,7 @@ func TestTermsErrorDoesNotEchoContent(t *testing.T) {
 
 func TestTermsLoadAndLookup(t *testing.T) {
 	dir := writeFiles(t, map[string]string{"en.txt": "One.\r\n\r\nTwo.\r\n", "ru.txt": termsRU})
-	cfg, err := Parse([]byte(termsYAML("      version: \" 2026-10-10 \"\n      text: { en: en.txt, ru: ru.txt }\n      url: { en: \"https://example.org/terms\", ru: \"https://example.org/ru\" }\n")), dir)
+	cfg, err := Parse([]byte(termsYAML("      text: { en: en.txt, ru: ru.txt }\n      url: { en: \"https://example.org/terms\", ru: \"https://example.org/ru\" }\n")), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +94,7 @@ func TestTermsLoadAndLookup(t *testing.T) {
 		t.Errorf("path = %q, want %q (relative to the config dir)", p.Terms.Text["en"], want)
 	}
 	v, ok := p.TermsFor("en")
-	if !ok || v.Version != "2026-10-10" || !reflect.DeepEqual(v.Paragraphs, []string{"One.", "Two."}) || v.TextLang != "en" || v.URL != "https://example.org/terms" {
+	if !ok || !reflect.DeepEqual(v.Paragraphs, []string{"One.", "Two."}) || v.TextLang != "en" || v.URL != "https://example.org/terms" {
 		t.Errorf("en = %+v", v)
 	}
 	if v, _ := p.TermsFor("ru"); v.TextLang != "ru" || v.URLLang != "ru" || len(v.Paragraphs) != 2 || v.Paragraphs[0] != "Бесплатно, как есть." {
@@ -113,7 +111,7 @@ func TestTermsLoadAndLookup(t *testing.T) {
 
 func TestTermsURLFallsBackPerPart(t *testing.T) {
 	dir := writeFiles(t, map[string]string{"en.txt": "x", "ru.txt": "y"})
-	cfg, err := Parse([]byte(termsYAML("      version: v1\n      text: { en: en.txt, ru: ru.txt }\n      url: { en: \"https://example.org/terms\" }\n")), dir)
+	cfg, err := Parse([]byte(termsYAML("      text: { en: en.txt, ru: ru.txt }\n      url: { en: \"https://example.org/terms\" }\n")), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +208,7 @@ func TestNoticeIn(t *testing.T) {
 // The sample agreements of deploy/ pass the same checks as an operator's own.
 func TestSampleTermsLoad(t *testing.T) {
 	dir := filepath.Join("..", "..", "deploy")
-	cfg, err := Parse([]byte(termsYAML("      version: sample\n      text:\n        en: terms.example.en.txt\n        ru: terms.example.ru.txt\n        kk: terms.example.kk.txt\n")), dir)
+	cfg, err := Parse([]byte(termsYAML("      text:\n        en: terms.example.en.txt\n        ru: terms.example.ru.txt\n        kk: terms.example.kk.txt\n")), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +239,7 @@ func TestTermsNotRegularFile(t *testing.T) {
 		t.Skip("symlinks unavailable:", err)
 	}
 	for _, p := range []string{"sub", "link"} {
-		_, err := Parse([]byte(termsYAML("      version: v1\n      text: { en: "+p+" }\n")), dir)
+		_, err := Parse([]byte(termsYAML("      text: { en: "+p+" }\n")), dir)
 		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
 			t.Errorf("%s: err = %v", p, err)
 		}

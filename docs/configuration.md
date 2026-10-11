@@ -29,7 +29,7 @@ Error messages never echo URL or key material.
 | `oauth.rate_limit.authorize_global` | derived from `code_ttl` (`per_minute: 2500`, `burst: 2500` at `5m`) | Unkeyed ceiling on the `POST /oauth/authorize` submissions that are about to get a code. `burst` defaults to `per_minute`; setting `burst` needs `per_minute` too. See [Rate limiting](#rate-limiting) |
 | `oauth.page.contact` | | Optional operator contact on the authorize page: `mailto:` address or `https://` URL, at most 256 bytes, no whitespace, control or Unicode format characters. Shown as a link (the text drops `mailto:`) under "Notice from the operator" |
 | `oauth.page.notice` | | Optional notice on the authorize page: a map of lowercase language code (2 or 3 letters) to plain text, each at most 4 KiB of UTF-8 without control characters other than newline and tab, at most 32 languages. Paragraphs are separated by blank lines. Text is HTML-escaped, never interpreted. When `notice` is set it must contain an `en` entry (config error otherwise); the page shows the entry for its language, else `en`. Unicode format characters (bidi controls, zero-width) are rejected |
-| `oauth.page.terms` | | Optional terms of use the user must accept on the authorize page. Keys `version`, `text`, `url`; see [Languages and terms of use](#languages-and-terms-of-use) |
+| `oauth.page.terms` | | Optional terms of use the user must accept on the authorize page. Keys `text`, `url`; see [Languages and terms of use](#languages-and-terms-of-use) |
 | `audit.enabled` | `false` | Opt-in audit log tying client IPs to audited credential values. Needs `log.level` `debug` or `info`. See [Audit log](#audit-log) |
 | `limits` | see [Proxy limits](#proxy-limits) | Rate, concurrency and body limits of the proxied MCP paths |
 | `trusted_proxies` | `["127.0.0.0/8", "::1/128"]` | Top-level list of CIDRs (or bare IPs, taken as `/32` or `/128`) of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are honoured. Empty or unset means loopback only. See [Client IP](#client-ip) |
@@ -471,14 +471,13 @@ upstreams:
 ```
 
 **Terms of use.** Optional. When `oauth.page.terms` is set, the form shows a
-collapsible "Terms of use (version X)" block (the text, and a "Full text" link
-when `url` is set) and a required checkbox before the Authorize button:
+collapsible "Terms of use" block (the text, and a "Full text" link when `url`
+is set) and a required checkbox before the Authorize button:
 
 ```yaml
 oauth:
   page:
     terms:
-      version: "2026-10-10"            # required, at most 32 printable characters
       text:                            # language -> file; en required
         en: /etc/tn-mcp-proxy/terms.en.txt
         ru: /etc/tn-mcp-proxy/terms.ru.txt
@@ -498,12 +497,10 @@ A submit without `accept_terms=on` is refused: the form is re-rendered
 (`400`) with a localized error banner and the checkbox marked invalid, keeping
 the non-secret values. The check runs before anything else costs resources (see
 [Authorization](architecture.md#authorization)), so a missing checkbox causes no
-upstream call and does not spend the global authorize ceiling. The terms
-version is sealed into the rendered form: a form shown under a different
-version (or before terms were configured) is refused the same way even with
-the box ticked, and re-rendered with the current terms. The audit `authorize`
-record carries `terms_version`, `terms_lang` and `lang`. Raising the `version`
-does not invalidate existing tokens: it applies to the next authorization.
+upstream call and does not spend the global authorize ceiling. The audit
+`authorize` record carries `terms_lang` and `lang`. Terms are not versioned:
+changing the text applies to the next authorization and does not invalidate
+existing tokens.
 
 Sample agreements are in `deploy/terms.example.en.txt`, `.ru.txt` and `.kk.txt`
 and ship in the release archive. They say the service is free and provided "as
@@ -549,7 +546,7 @@ as `X-Tn-Api-Key`).
 
 | `event` | Written when | Other fields |
 |---|---|---|
-| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host`, `lang` (the page language), `terms_version` and `terms_lang` (when `oauth.page.terms` is set: the version the user accepted and the language its text was shown in, which can be the `en` fallback) |
+| `authorize` | the credentials form is accepted and a code issued | `client_id`, `redirect_host`, `lang` (the page language), `terms_lang` (when `oauth.page.terms` is set: the language the accepted text was shown in, which can be the `en` fallback) |
 | `token` | a token pair is issued | `grant_type` (`authorization_code` or `refresh_token`), `client_id`, `family` |
 | `request` | a proxied MCP request ends | `method` (HTTP), `status`, `rpc_method`, `tool`; for a batch `rpc_batch` and `rpc` (`0`, `1`, ... each with `method` and `tool`) |
 

@@ -203,11 +203,9 @@ this order, cheapest refusal first:
    non-secret values kept). It is checked before every step below, even before
    the per-field value checks, so a missing checkbox costs no sizing, no
    allow-list lookup, no upstream call and no spend of the global ceiling (the
-   per-IP limit has already been charged by its middleware). The terms version
-   is sealed into the form at render time; a form shown under another version
-   is refused the same way and re-rendered with the current terms. The audit
-   `authorize` record then carries `terms_version`, `terms_lang` (the language
-   the terms were shown in) and `lang`;
+   per-IP limit has already been charged by its middleware). The audit
+   `authorize` record then carries `terms_lang` (the language the terms were
+   shown in) and `lang`;
 1. the token size budget: the credentials must fit the worst-case code, access
    and refresh token (`seal.MaxTokenSize`, 16 KiB encoded), else the form is
    re-rendered (`400`, "The credentials together are too long.");

@@ -57,14 +57,12 @@ oauth:
   #     ru: |
   #       Бесплатно, как есть, без гарантий.
   #   # Optional terms of use the user must accept (a required checkbox) before
-  #   # the Authorize button works. version (at most 32 characters) is shown on
-  #   # the page and written to the audit log. text: language -> plain-text file
-  #   # (at most 32 KiB, UTF-8, read at startup; relative paths are resolved
-  #   # against this file); "en" is required. url: optional language -> https://
-  #   # link to the full text, shown as "Full text". The files in deploy/ are
+  #   # the Authorize button works. text: language -> plain-text file (at most
+  #   # 32 KiB, UTF-8, read at startup; relative paths are resolved against
+  #   # this file); "en" is required. url: optional language -> https:// link
+  #   # to the full text, shown as "Full text". The files in deploy/ are
   #   # samples, not legal advice; the Kazakh texts need native review.
   #   terms:
-  #     version: "2026-10-10"
   #     text:
   #       en: /etc/tn-mcp-proxy/terms.en.txt
   #       ru: /etc/tn-mcp-proxy/terms.ru.txt

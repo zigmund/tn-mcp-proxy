@@ -80,9 +80,6 @@ type authRequest struct {
 	CodeChallenge string `json:"ch"`
 	State         string `json:"s,omitempty"`
 	Upstream      string `json:"u"`
-	// Terms is the terms version the form was rendered with ("" when none).
-	// A submit is accepted only against the current version.
-	Terms string `json:"t,omitempty"`
 }
 
 // authFailure is a failed authorize request. When RedirectURI is empty it is
@@ -128,7 +125,6 @@ type auditNotice struct {
 // termsView is the terms block of the form. A Lang field is set only when that
 // part is not in the page language, so the template can mark it.
 type termsView struct {
-	Version    string
 	Paragraphs []string
 	TextLang   string
 	URL        string
@@ -245,7 +241,6 @@ func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request, l locale)
 		CodeChallenge: challenge,
 		State:         state,
 		Upstream:      up.Name,
-		Terms:         s.termsVersion(),
 	}
 	sealed, err := s.sealer.Seal(seal.KindAuthRequest, req, s.now().Add(formTTL))
 	if err != nil {
@@ -318,18 +313,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 	// Terms come first: a missing acceptance costs nothing (no sizing, no
 	// allow-list lookup, no upstream call, no global-ceiling charge), and the
 	// answer does not depend on the credentials.
-	if cur := s.termsVersion(); cur != "" && (req.Terms != cur || r.PostForm.Get(acceptTermsField) != acceptTermsValue) {
-		if req.Terms != cur {
-			// The form was rendered under other terms (changed config or
-			// restart): show the current ones and bind the form to them.
-			req.Terms = cur
-			ns, err := s.sealer.Seal(seal.KindAuthRequest, req, s.now().Add(formTTL))
-			if err != nil {
-				s.log.Error("sealing authorize request", "err", err)
-				return pageFailure(http.StatusInternalServerError, msgInternal)
-			}
-			sealed = ns
-		}
+	if s.cfg.OAuth.Page.TermsEnabled() && r.PostForm.Get(acceptTermsField) != acceptTermsValue {
 		form(http.StatusBadRequest, uiMsg(msgTermsRequired))
 		return nil
 	}
@@ -403,11 +387,10 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request, l *loca
 		slog.String("lang", l.Lang()),
 		s.audit.Creds(up, creds),
 	}
-	if t := s.cfg.OAuth.Page.Terms; t != nil {
-		// The version the user accepted: a submit without acceptance never
-		// gets here.
-		v, _ := s.cfg.OAuth.Page.TermsFor(l.Lang())
-		attrs = append(attrs, slog.String("terms_version", t.Version), slog.String("terms_lang", v.TextLang))
+	if v, ok := s.cfg.OAuth.Page.TermsFor(l.Lang()); ok {
+		// The language of the text the user accepted: a submit without
+		// acceptance never gets here.
+		attrs = append(attrs, slog.String("terms_lang", v.TextLang))
 	}
 	s.audit.Record(r.Context(), audit.EventAuthorize, attrs...)
 	s.redirect(w, r, *l, req.RedirectURI, req.State, url.Values{"code": {code}})
@@ -608,7 +591,7 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, l locale, a formAr
 	}
 	if v, ok := page.TermsFor(l.Lang()); ok {
 		data.Terms = &termsView{
-			Version: v.Version, Paragraphs: v.Paragraphs, TextLang: otherLang(l, v.TextLang), URL: v.URL,
+			Paragraphs: v.Paragraphs, TextLang: otherLang(l, v.TextLang), URL: v.URL,
 		}
 		if v.URL != "" {
 			data.Terms.URLLang = otherLang(l, v.URLLang)
@@ -743,12 +726,4 @@ func nonPageLang(l locale, lts []config.LangText) []config.LangText {
 		out[i] = config.LangText{Text: lt.Text, Lang: otherLang(l, lt.Lang)}
 	}
 	return out
-}
-
-// termsVersion is the configured terms version, "" when terms are off.
-func (s *Server) termsVersion() string {
-	if t := s.cfg.OAuth.Page.Terms; t != nil {
-		return t.Version
-	}
-	return ""
 }

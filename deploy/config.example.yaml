@@ -38,6 +38,12 @@ oauth:
   refresh_token_ttl: 720h
   # Absolute lifetime of a login from the code exchange; refreshing never extends it.
   # max_session_ttl: 2160h
+  # Let the user pick the session lifetime on the authorize form ("Stay connected
+  # for"). Up to 8 entries, each a whole number of hours of at least 1h (Go
+  # durations have no d unit) or "unlimited" (no absolute end; refresh_token_ttl
+  # still applies). The choice then replaces max_session_ttl for new logins.
+  # session_choices: [720h, 2160h, 8760h, unlimited]
+  # session_default: 2160h  # one of the choices; the first when unset
   code_ttl: 5m  # at most 10m; access_token_ttl at most 24h
   allowed_redirect_uris:
     - https://claude.ai/api/mcp/auth_callback

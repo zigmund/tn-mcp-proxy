@@ -179,12 +179,27 @@ func (Secrets) MarshalYAML() (any, error) { return redacted, nil }
 // OAuth configures token lifetimes and redirect URI allow-list.
 // A TTL of 0 or unset means the default; negative values are errors.
 type OAuth struct {
-	AccessTokenTTL      time.Duration `yaml:"access_token_ttl"`
-	RefreshTokenTTL     time.Duration `yaml:"refresh_token_ttl"`
-	MaxSessionTTL       time.Duration `yaml:"max_session_ttl"` // absolute lifetime of a refresh chain, counted from the code exchange
-	CodeTTL             time.Duration `yaml:"code_ttl"`
-	AllowedRedirectURIs []string      `yaml:"allowed_redirect_uris"`
-	RateLimit           RateLimit     `yaml:"rate_limit"`
+	AccessTokenTTL  time.Duration `yaml:"access_token_ttl"`
+	RefreshTokenTTL time.Duration `yaml:"refresh_token_ttl"`
+	MaxSessionTTL   time.Duration `yaml:"max_session_ttl"` // absolute lifetime of a refresh chain, counted from the code exchange
+	CodeTTL         time.Duration `yaml:"code_ttl"`
+
+	// SessionChoices, when set, lets the user pick the session lifetime on the
+	// authorize form: each entry is a duration of at least 1h (a whole number of
+	// hours, at most MaxSessionChoices entries, no duplicates) or "unlimited".
+	// The choice supersedes MaxSessionTTL for new logins; MaxSessionTTL then
+	// only bounds refresh tokens that carry no choice. SessionDefault (one of
+	// the choices, the first when unset) is pre-selected. Unset keeps the fixed
+	// MaxSessionTTL and shows no choice.
+	SessionChoices []string `yaml:"session_choices"`
+	SessionDefault string   `yaml:"session_default"`
+	// Sessions and DefaultSession are SessionChoices and SessionDefault parsed.
+	// Filled by Parse; Sessions is empty when no choices are configured.
+	Sessions       []SessionChoice `yaml:"-"`
+	DefaultSession SessionChoice   `yaml:"-"`
+
+	AllowedRedirectURIs []string  `yaml:"allowed_redirect_uris"`
+	RateLimit           RateLimit `yaml:"rate_limit"`
 	// Page is the operator's contact and notice on the authorize page.
 	Page Page `yaml:"page"`
 }
@@ -439,6 +454,7 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 		errs = append(errs, err)
 	}
 	errs = append(errs, cfg.OAuth.Page.loadTerms()...)
+	errs = append(errs, cfg.OAuth.resolveSessions()...)
 	errs = append(errs, cfg.validate()...)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("invalid config: %w", errors.Join(errs...))

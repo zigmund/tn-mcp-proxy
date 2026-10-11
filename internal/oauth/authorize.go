@@ -42,6 +42,9 @@ const (
 	// the form's checkbox sends when ticked.
 	acceptTermsField = "accept_terms"
 	acceptTermsValue = "on"
+	// sessionField is the radio group of the session lifetime; its values are
+	// the canonical config.SessionChoice strings.
+	sessionField = "session"
 )
 
 // OAuth error codes (RFC 6749 §4.1.2.1, RFC 8707).
@@ -126,6 +129,20 @@ type termsView struct {
 	Paragraphs []string
 }
 
+// sessionView is the "Stay connected for" radio group.
+type sessionView struct {
+	Field   string
+	Options []sessionOption
+	Invalid bool // the submitted value was missing or not offered
+}
+
+// sessionOption is one radio button.
+type sessionOption struct {
+	Value   string // canonical config.SessionChoice string
+	Label   string
+	Checked bool
+}
+
 // formPage is the data of templates/authorize.html. Every user-visible string
 // not from the operator's config or the request is a catalog message resolved
 // through the T and Msg template functions, never built into the data.
@@ -139,11 +156,12 @@ type formPage struct {
 	Fields        []formField
 	Error         message // zero when there is no banner
 	Audit         *auditNotice
-	Notice        []string   // operator notice paragraphs, plain text
-	Terms         *termsView // nil when no terms are configured
-	TermsInvalid  bool       // the terms checkbox was not ticked
-	Contact       string     // visible text of the operator contact
-	ContactHref   string     // mailto: or https: link target
+	Notice        []string     // operator notice paragraphs, plain text
+	Terms         *termsView   // nil when no terms are configured
+	TermsInvalid  bool         // the terms checkbox was not ticked
+	Session       *sessionView // nil when session choices are not configured
+	Contact       string       // visible text of the operator contact
+	ContactHref   string       // mailto: or https: link target
 }
 
 // errorPage is the data of templates/error.html.
@@ -293,7 +311,8 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	creds, values, msg := collectCreds(up, r.PostForm)
 	form := func(status int, msg message) {
 		s.writeForm(w, status, formArgs{Client: c, Up: up, Req: req, Sealed: sealed, Values: values, Msg: msg,
-			TermsInvalid: msg.ID == msgTermsRequired})
+			TermsInvalid: msg.ID == msgTermsRequired, Session: r.PostForm.Get(sessionField),
+			SessionInvalid: msg.ID == msgSessionRequired})
 	}
 
 	// Terms come first: a missing acceptance costs nothing (no sizing, no
@@ -301,6 +320,15 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 	// answer does not depend on the credentials.
 	if s.cfg.OAuth.Page.TermsEnabled() && r.PostForm.Get(acceptTermsField) != acceptTermsValue {
 		form(http.StatusBadRequest, uiMsg(msgTermsRequired))
+		return nil
+	}
+	// The session choice is checked next to the terms, for the same reason:
+	// before sizing, the allow-list, the upstream check and the ceiling charge.
+	// Only PostForm is read (a query parameter must not choose a lifetime) and
+	// the value must equal the canonical string of an offered choice.
+	claim, choice, offered := s.submittedSession(r.PostForm)
+	if !offered {
+		form(http.StatusBadRequest, uiMsg(msgSessionRequired))
 		return nil
 	}
 	if msg.ID != "" {
@@ -358,6 +386,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		Creds:         creds,
 		JTI:           jti,
 		Exp:           exp.Unix(),
+		Session:       claim,
 	}, exp)
 	if err != nil {
 		// Never log the payload: it carries credentials.
@@ -372,9 +401,50 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) *authFa
 		slog.String("redirect_host", redirectHost(req.RedirectURI)),
 		s.audit.Creds(up, creds),
 	}
+	if len(s.cfg.OAuth.Sessions) > 0 {
+		attrs = append(attrs, slog.String("session", choice.String()))
+	}
 	s.audit.Record(r.Context(), audit.EventAuthorize, attrs...)
 	s.redirect(w, r, req.RedirectURI, req.State, url.Values{"code": {code}})
 	return nil
+}
+
+// submittedSession reads the session choice of a submitted form. With no
+// choices configured it reports (0, true): the code carries no choice and
+// max_session_ttl applies. Otherwise the posted value must be exactly the
+// canonical string of a configured choice; the result is that choice as a
+// tokens.Code.Session value.
+func (s *Server) submittedSession(form url.Values) (int64, config.SessionChoice, bool) {
+	if len(s.cfg.OAuth.Sessions) == 0 {
+		return 0, config.SessionChoice{}, true
+	}
+	v := form.Get(sessionField)
+	for _, c := range s.cfg.OAuth.Sessions {
+		if c.String() == v {
+			return sessionClaim(c), c, true
+		}
+	}
+	return 0, config.SessionChoice{}, false
+}
+
+// sessionGroup builds the radio group: selected (a submitted canonical value,
+// possibly junk) stays checked when it is offered, otherwise the default is.
+func (s *Server) sessionGroup(selected string, invalid bool) *sessionView {
+	o := s.cfg.OAuth
+	if len(o.Sessions) == 0 {
+		return nil
+	}
+	checked := o.DefaultSession.String()
+	for _, c := range o.Sessions {
+		if c.String() == selected {
+			checked = selected
+		}
+	}
+	v := &sessionView{Field: sessionField, Invalid: invalid}
+	for _, c := range o.Sessions {
+		v.Options = append(v.Options, sessionOption{Value: c.String(), Label: sessionLabel(c), Checked: c.String() == checked})
+	}
+	return v
 }
 
 // redirectHost returns the host (with port, if any) of a redirect URI.
@@ -514,6 +584,10 @@ type formArgs struct {
 	Msg    message
 	// TermsInvalid marks the terms checkbox as the cause of Msg.
 	TermsInvalid bool
+	// Session is the submitted session value to keep selected (empty on a
+	// fresh form); SessionInvalid marks the radio group as the cause of Msg.
+	Session        string
+	SessionInvalid bool
 }
 
 // writeForm renders the credentials form with the security headers.
@@ -550,6 +624,7 @@ func (s *Server) writeForm(w http.ResponseWriter, status int, a formArgs) {
 		Error:         msg,
 		Notice:        page.NoticeParagraphs(),
 		TermsInvalid:  a.TermsInvalid,
+		Session:       s.sessionGroup(a.Session, a.SessionInvalid),
 		Contact:       page.ContactText(),
 		ContactHref:   page.ContactHref(),
 	}

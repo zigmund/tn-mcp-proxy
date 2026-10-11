@@ -33,7 +33,8 @@ type Access struct {
 // Start is the unix time of the original login (the code exchange) and is
 // copied unchanged on every rotation. Exp slides with each refresh, but the
 // token endpoint caps it, and refuses the chain, at Start plus
-// oauth.max_session_ttl, so a chain cannot be kept alive forever. Start == 0
+// oauth.max_session_ttl (or at End when the user chose a session length), so a
+// chain cannot be kept alive forever unless the user chose so. Start == 0
 // marks a token issued before the field existed; the token endpoint treats
 // the moment of its next refresh as the start of the chain (one-time
 // migration).
@@ -45,7 +46,18 @@ type Refresh struct {
 	Gen      int64             `json:"g"` // generation within the chain, starting at 0
 	Exp      int64             `json:"e"` // expiry, unix seconds (mirrors the seal envelope; bounds the cache entry)
 	Start    int64             `json:"s"` // login time, unix seconds; constant across the chain, 0 for legacy tokens
+	// End is the absolute session end the user chose at login, copied unchanged
+	// on every rotation: a unix time (> 0), or SessionUnlimited for no absolute
+	// end (the idle refresh expiry still applies). 0, the zero value and what
+	// tokens issued before the choice existed (or without one) carry, means
+	// "no choice": the end is Start plus oauth.max_session_ttl. Unlimited must
+	// therefore never be the zero value.
+	End int64 `json:"z,omitempty"`
 }
+
+// SessionUnlimited is the marker for "no absolute session end" in Code.Session
+// and Refresh.End. It is deliberately not 0, which means "no choice made".
+const SessionUnlimited int64 = -1
 
 // Code is the payload of an authorization code (seal.KindCode). The code
 // expires through the seal envelope (oauth.code_ttl). The token endpoint
@@ -62,6 +74,11 @@ type Code struct {
 	Creds         map[string]string `json:"h"`  // canonical header name -> value
 	JTI           string            `json:"j"`  // random unique id, enforced single-use by the token endpoint
 	Exp           int64             `json:"e"`  // expiry, unix seconds (mirrors the seal envelope; bounds the replay cache entry)
+	// Session is the session length the user chose on the authorize form, in
+	// seconds (> 0), or SessionUnlimited. 0 means no choice was offered; the
+	// token endpoint then applies oauth.max_session_ttl. The length counts from
+	// the code exchange, where it becomes Refresh.End.
+	Session int64 `json:"d,omitempty"`
 }
 
 // String redacts the credentials.

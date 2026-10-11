@@ -185,7 +185,7 @@ that follows the POST, so the client's origin must be listed).
 
 **Submission.** The POST body is capped at 32 KiB (`413` page beyond), and a
 declared cross-site POST gets a `403` page. Only the sealed `request` and the
-`cred_N` fields, plus `accept_terms`, are read; the client, redirect and upstream are re-validated
+`cred_N` fields, plus `accept_terms` and `session`, are read; the client, redirect and upstream are re-validated
 against the current config, so a revoked redirect or removed upstream fails
 even for an already rendered form, and an invalid or expired sealed request is
 a `400` page. Values are trimmed; a required value that is empty, and any value
@@ -199,7 +199,11 @@ this order, cheapest refusal first:
    the per-field value checks, so a missing checkbox costs no sizing, no
    allow-list lookup, no upstream call and no spend of the global ceiling (the
    per-IP limit has already been charged by its middleware). A refused submit
-   writes no audit record;
+   writes no audit record. Right after it, when `oauth.session_choices` is set,
+   the session choice: the `session` field of the POST body (never the query)
+   must equal the canonical string of a configured choice (`720h`,
+   `unlimited`), else the form is re-rendered (`400`, banner, the radio group
+   marked `aria-invalid`) with no audit record, ahead of the same steps;
 1. the token size budget: the credentials must fit the worst-case code, access
    and refresh token (`seal.MaxTokenSize`, 16 KiB encoded), else the form is
    re-rendered (`400`, "The credentials together are too long.");
@@ -369,8 +373,8 @@ refresh_token}` (`scope` is omitted: scopes are unused). The access token is
 upstream name), expiring after `oauth.access_token_ttl` (at most 24 h) unless
 the session cap below is nearer; `expires_in` is the remaining lifetime in
 seconds. The refresh token is `seal.KindRefresh` with `tokens.Refresh`
-(`u`, `c`, `h`, family `f`, generation `g`, expiry `e`, login start `s`),
-expiring after `oauth.refresh_token_ttl`. Every refresh rotates the pair and
+(`u`, `c`, `h`, family `f`, generation `g`, expiry `e`, login start `s`,
+optional session end `z`), expiring after `oauth.refresh_token_ttl`. Every refresh rotates the pair and
 restarts the refresh expiry (sliding expiry), but the chain has an absolute
 lifetime: `s` is the unix time of the code exchange, copied unchanged on every
 rotation, and a refresh at or after `s + oauth.max_session_ttl` is an
@@ -379,7 +383,26 @@ capped at that session end. A legacy refresh token without `s` (issued before
 the field existed) is migrated once: its first refresh treats that moment as
 the start, so the new chain is bounded from there on (a stolen legacy token
 therefore also gets a full window). A start more than 5 minutes in the future
-is refused as forged or corrupt. The credentials travel
+is refused as forged or corrupt.
+
+**Session choice.** With `oauth.session_choices` the authorize form carries the
+user's pick through the sealed code (`tokens.Code.Session`, seconds, or `-1` for
+unlimited) and the code exchange turns it into the absolute session end `z` of
+the refresh token (`start + choice`; `-1` for unlimited), copied unchanged on
+every rotation. `z` replaces `s + oauth.max_session_ttl` as the cap on refresh
+expiry, access expiry and `expires_in`, and a refresh at or after it is an
+`invalid_grant`. `-1` means no absolute cap: only the sliding
+`oauth.refresh_token_ttl` limits the chain. `z` is omitted when absent, and a
+token without it (issued before the choice existed, or with no choices
+configured) keeps the `s + oauth.max_session_ttl` semantics; the absent value
+is `0`, never read as unlimited, and any other value below `-1` is refused. A
+code whose choice the config no longer offers is an `invalid_grant`. On
+refresh `z` is clamped to the current config, only ever downward: at most the
+start plus the longest configured finite choice (`oauth.max_session_ttl` when
+no choices are configured), and kept as is when an `unlimited` choice is still
+configured. Lowering or removing choices therefore shortens existing logins at
+their next refresh but never lengthens them; `0` stays `0`, and a choice is
+never mapped back to `0`, which could extend it. The credentials travel
 from the code into both tokens unchanged. Nothing is revoked server-side when
 a client disconnects; the chain simply runs out at the idle or absolute limit.
 

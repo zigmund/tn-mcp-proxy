@@ -3,6 +3,10 @@ package oauth
 import (
 	"fmt"
 	"html/template"
+	"strconv"
+	"time"
+
+	"github.com/zigmund/tn-mcp-proxy/internal/config"
 )
 
 // Message ids of the authorize and error pages. Templates refer to them as
@@ -28,6 +32,7 @@ const (
 	msgCredsNotAllowed = "cred.not_allowed"
 	msgCredsNoVerdict  = "cred.unavailable"
 	msgTermsRequired   = "terms.error"
+	msgSessionRequired = "session.error"
 )
 
 // catalog holds the page text: message id -> text. A text is a fmt format with
@@ -39,6 +44,16 @@ var catalog = map[string]string{
 	"terms.region_label": "Terms of use text",
 	"terms.accept":       "I have read and accept the terms of use",
 	msgTermsRequired:     "Accept the terms of use to continue.",
+
+	"session.legend":    "Stay connected for",
+	"session.unlimited": "Until revoked",
+	"session.year":      "%[1]s year",
+	"session.years":     "%[1]s years",
+	"session.day":       "%[1]s day",
+	"session.days":      "%[1]s days",
+	"session.hour":      "%[1]s hour",
+	"session.hours":     "%[1]s hours",
+	msgSessionRequired:  "Choose how long to stay connected.",
 
 	"page.title":        "Connect %[1]s",
 	"page.request_tail": "is requesting access to %[1]s",
@@ -108,6 +123,27 @@ func text(id string, args ...any) string {
 		return t
 	}
 	return fmt.Sprintf(t, args...)
+}
+
+// sessionLabel is the English radio label of a session choice, derived from its
+// duration: "Until revoked", then years (multiples of 8760h), days (multiples
+// of 24h) and otherwise hours.
+func sessionLabel(c config.SessionChoice) string {
+	if c.Unlimited {
+		return text("session.unlimited")
+	}
+	n := int64(c.Duration / time.Hour)
+	unit, per := "hour", int64(1)
+	switch {
+	case n%8760 == 0:
+		unit, per = "year", 8760
+	case n%24 == 0:
+		unit, per = "day", 24
+	}
+	if n /= per; n != 1 {
+		unit += "s"
+	}
+	return text("session."+unit, strconv.FormatInt(n, 10))
 }
 
 // msgText renders m; the zero message is empty.

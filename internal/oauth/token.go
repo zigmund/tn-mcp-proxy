@@ -219,6 +219,14 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, form url.V
 		return
 	}
 
+	// Likewise before the claim: a choice the config no longer offers (a restart
+	// may have changed it) is refused instead of being turned into a lifetime
+	// the operator did not allow.
+	if !s.sessionChoiceOffered(code.Session) {
+		grant("session choice no longer offered")
+		return
+	}
+
 	switch err := s.codes.claim(code.JTI, time.Unix(code.Exp, 0), s.now()); {
 	case err == nil:
 	case errors.Is(err, errReplayed):
@@ -237,14 +245,22 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, form url.V
 		return
 	}
 	now := s.now()
-	if s.issueAt(w, now, up.Name, clientID, code.Creds, fam, 0, now.Unix()) {
-		s.auditToken(r, grantAuthorizationCode, up, clientID, fam, code.Creds)
+	var end int64 // 0: no choice, the end is start + max_session_ttl
+	switch {
+	case code.Session == tokens.SessionUnlimited:
+		end = tokens.SessionUnlimited
+	case code.Session > 0:
+		end = now.Unix() + code.Session
+	}
+	if s.issueAt(w, now, up.Name, clientID, code.Creds, fam, 0, now.Unix(), end) {
+		s.auditToken(r, grantAuthorizationCode, up, clientID, fam, code.Creds, now.Unix(), end)
 	}
 }
 
 // refresh redeems a refresh token. Refresh tokens are rotated (every success
 // returns a new pair with a fresh sliding expiry, capped at the absolute
-// session end, start + oauth.max_session_ttl) and single-use with reuse
+// session end: the user's choice when the token carries one, else start +
+// oauth.max_session_ttl) and single-use with reuse
 // detection by family: see familyCache.use. The token is spent before the
 // new pair is sealed, so a sealing failure, or a client that loses the
 // response, leaves a spent token and requires re-authorization; the
@@ -306,14 +322,21 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, form url.Values
 		grant("session start out of range")
 		return
 	}
-	if now.Unix() >= start+int64(s.maxSessionTTL()/time.Second) {
+	if rt.End < tokens.SessionUnlimited {
+		// Minted by this server: only 0, SessionUnlimited and unix times exist.
+		grant("session end out of range")
+		return
+	}
+	// Fail closed on a config that got stricter since issue: only ever lower.
+	sessEnd := s.boundSessionEnd(start, rt.End)
+	if end, capped := s.sessionCap(start, sessEnd); capped && now.Unix() >= end.Unix() {
 		// Absolute lifetime reached; same generic answer as any other dead token.
 		grant("session lifetime exceeded")
 		return
 	}
 	// The entry must outlive every token it covers, also when the TTL was
 	// lowered since rt was issued (the cache additionally never shortens it).
-	newExp := s.cappedExp(now, s.refreshTTL(), start)
+	newExp := s.cappedExp(now, s.refreshTTL(), start, sessEnd)
 	if old := time.Unix(rt.Exp, 0); old.After(newExp) {
 		newExp = old
 	}
@@ -350,8 +373,8 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, form url.Values
 		s.cacheFull(w, "refresh token", &s.families.full)
 		return
 	}
-	if s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1, start) {
-		s.auditToken(r, grantRefreshToken, up, clientID, rt.Family, rt.Creds)
+	if s.issueAt(w, now, up.Name, clientID, rt.Creds, rt.Family, rt.Gen+1, start, sessEnd) {
+		s.auditToken(r, grantRefreshToken, up, clientID, rt.Family, rt.Creds, start, sessEnd)
 	}
 }
 
@@ -403,36 +426,44 @@ func (s *Server) checkResource(w http.ResponseWriter, form url.Values, up config
 }
 
 // auditToken writes the audit record of an issued token pair. Digests only:
-// the client_id and family id are never written raw.
-func (s *Server) auditToken(r *http.Request, grant string, up config.Upstream, clientID, family string, creds map[string]string) {
-	s.audit.Record(r.Context(), audit.EventToken,
+// the client_id and family id are never written raw. The session attribute is
+// the user's choice in canonical form, present only for tokens that carry one.
+func (s *Server) auditToken(r *http.Request, grant string, up config.Upstream, clientID, family string, creds map[string]string, start, end int64) {
+	attrs := []slog.Attr{
 		slog.String("grant_type", grant),
 		slog.String("client_ip", s.clientIP(r)),
 		slog.String("upstream", up.Name),
 		slog.String("client_id", shortID(clientID)),
 		slog.String("family", shortID(family)),
 		s.audit.Creds(up, creds),
-	)
+	}
+	switch {
+	case end == tokens.SessionUnlimited:
+		attrs = append(attrs, slog.String("session", config.SessionUnlimited))
+	case end > 0:
+		attrs = append(attrs, slog.String("session", config.SessionChoice{Duration: time.Duration(end-start) * time.Second}.String()))
+	}
+	s.audit.Record(r.Context(), audit.EventToken, attrs...)
 }
 
 // issueAt seals a fresh access and refresh token pair and writes the
 // response. It takes an explicit clock reading, so the refresh token's expiry
 // equals the one already recorded in the family cache. start is the unix time
-// of the login (see tokens.Refresh); both expiries are capped at start plus
-// oauth.max_session_ttl, and the caller guarantees now is before that. It
-// reports whether the tokens were issued.
-func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientID string, creds map[string]string, fam string, gen, start int64) bool {
+// of the login and end the session end (see tokens.Refresh); both expiries are
+// capped at the session end (see sessionCap), and the caller guarantees now is
+// before that. It reports whether the tokens were issued.
+func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientID string, creds map[string]string, fam string, gen, start, end int64) bool {
 	accessTTL, refreshTTL := s.cfg.OAuth.AccessTokenTTL, s.refreshTTL()
 	if accessTTL <= 0 {
 		accessTTL = config.DefaultAccessTokenTTL
 	}
-	accessExp := s.cappedExp(now, accessTTL, start)
+	accessExp := s.cappedExp(now, accessTTL, start, end)
 	access, err := s.sealer.Seal(seal.KindAccess, tokens.Access{Upstream: upstream, ClientID: clientID, Creds: creds}, accessExp)
 	var refresh string
 	if err == nil {
-		refreshExp := s.cappedExp(now, refreshTTL, start)
+		refreshExp := s.cappedExp(now, refreshTTL, start, end)
 		refresh, err = s.sealer.Seal(seal.KindRefresh, tokens.Refresh{
-			Upstream: upstream, ClientID: clientID, Creds: creds, Family: fam, Gen: gen, Exp: refreshExp.Unix(), Start: start,
+			Upstream: upstream, ClientID: clientID, Creds: creds, Family: fam, Gen: gen, Exp: refreshExp.Unix(), Start: start, End: end,
 		}, refreshExp)
 	}
 	if err != nil {
@@ -454,13 +485,79 @@ func (s *Server) issueAt(w http.ResponseWriter, now time.Time, upstream, clientI
 }
 
 // cappedExp returns now+ttl, but never later than the end of the session that
-// began at start (unix seconds): start plus oauth.max_session_ttl.
-func (s *Server) cappedExp(now time.Time, ttl time.Duration, start int64) time.Time {
+// began at start (unix seconds) and carries the choice end (see sessionCap).
+// An unlimited session has no end: only ttl applies.
+func (s *Server) cappedExp(now time.Time, ttl time.Duration, start, end int64) time.Time {
 	exp := now.Add(ttl)
-	if end := time.Unix(start+int64(s.maxSessionTTL()/time.Second), 0); end.Before(exp) {
-		return end
+	if limit, capped := s.sessionCap(start, end); capped && limit.Before(exp) {
+		return limit
 	}
 	return exp
+}
+
+// sessionCap returns the absolute end of a session and whether it has one. end
+// is tokens.Refresh.End: a unix time, tokens.SessionUnlimited (no end), or 0
+// for a token without a choice, whose session ends at start plus
+// oauth.max_session_ttl. Zero is never read as unlimited.
+func (s *Server) sessionCap(start, end int64) (time.Time, bool) {
+	switch {
+	case end == tokens.SessionUnlimited:
+		return time.Time{}, false
+	case end > 0:
+		return time.Unix(end, 0), true
+	}
+	return time.Unix(start+int64(s.maxSessionTTL()/time.Second), 0), true
+}
+
+// boundSessionEnd clamps the session end carried by a refresh token to what the
+// current config allows, so that lowering or removing choices shortens
+// existing logins at their next refresh. It only ever lowers: it never
+// extends a session and never maps a choice back to 0 (start +
+// max_session_ttl could be later). 0 (no choice) stays 0. With an unlimited
+// choice configured the end is kept; otherwise the limit is start plus the
+// longest finite choice, or max_session_ttl when no choices are configured.
+func (s *Server) boundSessionEnd(start, end int64) int64 {
+	if end == 0 {
+		return 0
+	}
+	sessions := s.cfg.OAuth.Sessions
+	longest := s.maxSessionTTL()
+	if len(sessions) > 0 {
+		longest = 0
+		for _, c := range sessions {
+			if c.Unlimited {
+				return end
+			}
+			longest = max(longest, c.Duration)
+		}
+	}
+	limit := start + int64(longest/time.Second)
+	if end == tokens.SessionUnlimited || end > limit {
+		return limit
+	}
+	return end
+}
+
+// sessionChoiceOffered reports whether v, a tokens.Code.Session, is acceptable
+// now: 0 (no choice) always, otherwise only a value the config offers.
+func (s *Server) sessionChoiceOffered(v int64) bool {
+	if v == 0 {
+		return true
+	}
+	for _, c := range s.cfg.OAuth.Sessions {
+		if sessionClaim(c) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionClaim is the tokens.Code.Session value of a choice.
+func sessionClaim(c config.SessionChoice) int64 {
+	if c.Unlimited {
+		return tokens.SessionUnlimited
+	}
+	return int64(c.Duration / time.Second)
 }
 
 func (s *Server) maxSessionTTL() time.Duration {

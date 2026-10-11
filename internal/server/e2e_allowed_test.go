@@ -85,8 +85,8 @@ upstreams:
 	form.Set("cred_0", "someone-elses-key")
 	rec = postForm(t, h, "/oauth/authorize", form)
 	mustStatus(t, rec, http.StatusBadRequest, "foreign key")
-	if strings.Contains(rec.Body.String(), "allowed") {
-		t.Error("form reveals the allow-list")
+	if body := rec.Body.String(); !strings.Contains(body, "are not allowed on this server") || strings.Contains(body, "rejected these credentials") {
+		t.Errorf("form lacks the explicit not-allowed message:\n%s", body)
 	}
 	if n, _, _ := up.snapshot(); n != 0 {
 		t.Fatalf("foreign key reached the upstream (%d calls)", n)

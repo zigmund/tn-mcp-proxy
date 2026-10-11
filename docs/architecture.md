@@ -137,22 +137,23 @@ configured.
 
 **Allow-list.** If a credential has `allowed_values`, `POST /oauth/authorize`
 checks the collected values (`Upstream.CredsAllowed`: exact match after the
-form's trimming; each candidate is compared as a SHA-256 digest in constant
-time and the loop does not stop at the first match) after the length and token
-size checks and before the upstream validation call and before sealing. A
-mismatch re-renders
-the form with the same message as a rejected credential, and the upstream is
-never contacted for foreign keys. Status and message are identical, but the
-timing is not: a list refusal returns at once, while a listed key with a wrong
-secret waits for the upstream check, so a patient observer can infer that a
-list exists and whether a candidate key is on it (the comparison itself is
-constant-time, and the secret is still required). The list gates token issuance
-only and is effective only together with `validate` (a config without it is
-rejected at load); request content is the business of `forbidden_arguments`,
-see Proxying. The same check runs in both token grants (`invalid_grant`) and in
-the proxy's `authenticate` (`401 invalid_token`); see Token endpoint and
-Proxying. At startup the binary logs one warning per upstream without any list,
-and one per upstream with a list but without `forbidden_arguments`.
+form's trimming; each candidate is compared as a SHA-256 digest in constant time
+and the loop does not stop at the first match) after the length and token size
+checks and before the upstream validation call and before sealing. A mismatch
+re-renders the form (`400`) with an explicit "not allowed on this server"
+message, distinct from the "rejected these credentials" message of a real
+upstream rejection, and the upstream is never contacted for foreign keys. The
+message reveals that an allow-list is in use; that is intended, so an operator
+can tell an allow-list refusal from a bad key. The timing differs too: a list
+refusal returns at once, while a listed key with a wrong secret waits for the
+upstream check (the comparison itself is constant-time, and the secret is still
+required). The list gates token issuance only and is effective only together
+with `validate` (a config without it is rejected at load); request content is
+the business of `forbidden_arguments`, see Proxying. The same check runs in both
+token grants (`invalid_grant`) and in the proxy's `authenticate` (`401
+invalid_token`); see Token endpoint and Proxying. At startup the binary logs one
+warning per upstream without any list, and one per upstream with a list but
+without `forbidden_arguments`.
 
 **ChatGPT and RFC 9207.** ChatGPT uses the stable redirect URI
 `https://chatgpt.com/connector_platform_oauth_redirect` only with servers that

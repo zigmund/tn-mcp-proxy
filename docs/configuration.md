@@ -141,18 +141,19 @@ holder can still put anything into a tool call, including credentials as tool
 arguments, which some upstreams accept as a documented fallback. That is what
 `forbidden_arguments` is for (below).
 
-Enforcement: `POST /oauth/authorize` refuses a value outside the list with the
-same message and status (`400`) as a rejected credential, before any upstream
-call and before anything is sealed; the `authorization_code` and
+Enforcement: `POST /oauth/authorize` refuses a value outside the list with
+status `400` and an explicit message ("These credentials are not allowed on this
+server: its operator has restricted access to specific keys."), before any
+upstream call and before anything is sealed; the `authorization_code` and
 `refresh_token` grants answer `invalid_grant`; every proxied request answers
 `401 invalid_token`. So removing a value from the list and restarting cuts off
 tokens already issued for it. The comparison is made on SHA-256 digests with
-`crypto/subtle`, against every entry (it does not stop at the first match). The message is identical,
-but the timing is not: a refusal by the list returns without an upstream round
-trip, while a listed key with a wrong secret waits for the credential check. An
-observer can therefore infer by timing that a list exists and whether a
-candidate API key is on it. The comparison itself is constant-time and the
-secret is still required.
+`crypto/subtle`, against every entry (it does not stop at the first match). The
+form therefore reveals that an allow-list is in use, on purpose: an operator who
+enters a key that is not on it must not mistake the refusal for an upstream
+rejection (which keeps the "rejected these credentials" message). Timing differs
+as well: a refusal by the list returns without an upstream round trip. The
+comparison itself is constant-time and the secret is still required.
 
 Without any list on an upstream, startup logs one `warn` for that upstream
 (`upstream has no allowed_values: ...`). An upstream with a list but without
